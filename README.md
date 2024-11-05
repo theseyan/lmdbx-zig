@@ -24,14 +24,19 @@ out-of-the-box, not silently and catastrophically break down.
 
 ## Installation
 
-Add lmdbx-zig to `build.zig.zon`
+```bash
+# replace {VERSION} with the latest release eg: v0.1.0
+zig fetch https://github.com/theseyan/lmdbx-zig/archive/refs/tags/{VERSION}.tar.gz
+```
+
+Copy the hash generated and add lmdbx-zig to `build.zig.zon`:
 
 ```zig
 .{
     .dependencies = .{
         .lmdbx = .{
-            .url = "https://github.com/theseyan/lmdbx-zig/archive/refs/tags/v0.1.0.tar.gz",
-            .hash = "1220e8e877635b4960480d3b7cca4f75d9f636f6515d1cb2fa1450fc6f90a88ffbbb",
+            .url = "https://github.com/theseyan/lmdbx-zig/archive/refs/tags/{VERSION}.tar.gz",
+            .hash = "{HASH}",
         },
     },
 }
