@@ -17,9 +17,7 @@ pub fn build(b: *std.Build) void {
                 .explicit = &std.Target.x86.cpu.skylake_avx512 // I don't know if Skylake is a good choice; PRs always welcome.
             },
             .aarch64 => target.query.cpu_model,
-            else => {
-                @panic("Unsupported CPU architecture");
-            }
+            else => target.query.cpu_model // Unknown CPU
         },
         .cpu_features_add = switch (target.result.cpu.arch) {
             .x86_64 => std.Target.x86.featureSet(&[_]std.Target.x86.Feature{
@@ -30,9 +28,7 @@ pub fn build(b: *std.Build) void {
                 .avx512vl,
             }),
             .aarch64 => target.result.cpu.features,
-            else => {
-                @panic("Unsupported CPU architecture");
-            }
+            else => std.Target.Cpu.Feature.Set.empty // Unknown CPU
         },
     });
 
@@ -42,16 +38,17 @@ pub fn build(b: *std.Build) void {
     const cpuf_dep = b.dependency("cpu_features", .{});
 
     mdbx.addIncludePath(cpuf_dep.path("cpu_model"));
-    mdbx.addCSourceFile(.{
-        .file = switch (target.result.cpu.arch) {
-            .x86_64 => cpuf_dep.path("cpu_model/x86.c"),
-            .aarch64 => cpuf_dep.path("cpu_model/aarch64.c"),
-            else => {
-                @panic("Unsupported CPU architecture");
-            }
-        },
-        .flags = &.{}
-    });
+
+    if (target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64) {
+        mdbx.addCSourceFile(.{
+            .file = switch (target.result.cpu.arch) {
+                .x86_64 => cpuf_dep.path("cpu_model/x86.c"),
+                .aarch64 => cpuf_dep.path("cpu_model/aarch64.c"),
+                else => unreachable
+            },
+            .flags = &.{}
+        });
+    }
 
     // libMDBX
     const mdbx_dep = b.dependency("mdbx", .{});
@@ -119,7 +116,7 @@ pub fn build(b: *std.Build) void {
     bench.linkLibC();
     bench.root_module.addImport("lmdbx", mdbx);
 
-    b.installArtifact(bench);
+    // b.installArtifact(bench);
 
     // Linker flags for libMDBX
     bench.link_gc_sections = true;

@@ -1085,7 +1085,7 @@ pub fn mdbx_env_set_maxreaders(arg_env: ?*MDBX_env, arg_readers: c_uint) callcon
     _ = &env;
     var readers = arg_readers;
     _ = &readers;
-    return mdbx_env_set_option(env, @as(c_uint, @bitCast(MDBX_opt_max_readers)), @as(u64, @bitCast(@as(c_ulong, readers))));
+    return mdbx_env_set_option(env, @as(c_uint, @bitCast(MDBX_opt_max_readers)), @as(u64, @bitCast(@as(u64, readers))));
 }
 pub fn mdbx_env_get_maxreaders(arg_env: ?*const MDBX_env, arg_readers: [*c]c_uint) callconv(.C) c_int {
     var env = arg_env;
@@ -1107,7 +1107,7 @@ pub fn mdbx_env_set_maxdbs(arg_env: ?*MDBX_env, arg_dbs: MDBX_dbi) callconv(.C) 
     _ = &env;
     var dbs = arg_dbs;
     _ = &dbs;
-    return mdbx_env_set_option(env, @as(c_uint, @bitCast(MDBX_opt_max_db)), @as(u64, @bitCast(@as(c_ulong, dbs))));
+    return mdbx_env_set_option(env, @as(c_uint, @bitCast(MDBX_opt_max_db)), @as(u64, @bitCast(@as(u64, dbs))));
 }
 pub fn mdbx_env_get_maxdbs(arg_env: ?*const MDBX_env, arg_dbs: [*c]MDBX_dbi) callconv(.C) c_int {
     var env = arg_env;
