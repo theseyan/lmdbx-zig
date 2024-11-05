@@ -1,1 +1,1 @@
-# libmdbx-zig
+# lmdbx-zig
