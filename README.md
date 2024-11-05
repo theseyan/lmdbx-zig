@@ -37,6 +37,14 @@ Add lmdbx-zig to `build.zig.zon`
 }
 ```
 
+### Targets
+
+`lmdbx-zig` officially supports cross-compiling to the following target triples:
+- `x86_64-linux-gnu`, `x86_64-macos`, `x86_64-windows-gnu`
+- `aarch64-linux-gnu`, `aarch64-macos`, `aarch64-windows-gnu`
+
+Successful compilation on other targets is not guaranteed (but might work).
+
 ## Usage
 
 A libMDBX environment can either have multiple named databases, or a single unnamed database.
