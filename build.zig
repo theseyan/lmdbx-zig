@@ -6,26 +6,15 @@ const IS_DEV = false;
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
 
-    // For x86 target, we need AVX512 feature target.
+    // For x86 target, we need .evex512 features.
     // aarch64 has NEON which is (probably?) enough.
     const target_query = b.resolveTargetQuery(std.Target.Query{
         .cpu_arch = target.result.cpu.arch,
         .os_tag = target.result.os.tag,
         .abi = target.result.abi,
-        .cpu_model = switch (target.result.cpu.arch) {
-            .x86_64 => .{ 
-                .explicit = &std.Target.x86.cpu.skylake_avx512 // I don't know if Skylake is a good choice; PRs always welcome.
-            },
-            .aarch64 => target.query.cpu_model,
-            else => target.query.cpu_model // Unknown CPU
-        },
         .cpu_features_add = switch (target.result.cpu.arch) {
             .x86_64 => std.Target.x86.featureSet(&[_]std.Target.x86.Feature{
-                .avx512f,
-                .avx512bw,
-                .avx512cd,
-                .avx512dq,
-                .avx512vl,
+                .evex512
             }),
             .aarch64 => target.result.cpu.features,
             else => std.Target.Cpu.Feature.Set.empty // Unknown CPU
