@@ -6,8 +6,8 @@
     .dependencies = .{
         // libmdbx C library, 0.13.1
         .mdbx = .{
-            .url = "https://libmdbx.dqdkfa.ru/release/libmdbx-amalgamated-0.13.1.tar.xz",
-            .hash = "12202a294bd528a8c34da4556eb81ed0241028272a4ca736da5f9d0d5f3bae9a4b14"
+            .url = "https://libmdbx.dqdkfa.ru/release/libmdbx-amalgamated-0.13.2.tar.xz",
+            .hash = "122006d09434a82fc38e5f8c2dd7e89c656619fa25a61fa9792398ac2a2d2a5e0de0"
         },
 
         // We need this until https://github.com/ziglang/zig/pull/20081 gets merged
