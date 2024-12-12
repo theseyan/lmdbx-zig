@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
                 if (!has_avx512) std.debug.print("Building without SIMD optimizations as target doesn't support avx512bw. This is a Zig compiler bug to be fixed in 0.14.\n", .{});
 
                 break :blk std.Target.x86.featureSet(&[_]std.Target.x86.Feature{
-                    if (has_avx512) .evex512 else @enumFromInt(target.result.cpu.features.ints[0])
+                    if (has_avx512) .evex512 else break :blk std.Target.Cpu.Feature.Set.empty
                 });
             },
             .aarch64 => target.result.cpu.features,
