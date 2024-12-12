@@ -57,6 +57,61 @@ test "basic operations" {
     }
 }
 
+test "serialized operations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{});
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    // A shared 4KiB buffer for serializing
+    var buffer: [4096]u8 = undefined;
+
+    const Person = struct {
+        name: []const u8,
+        age: u8,
+        friends: []const []const u8
+    };
+
+    const me = Person{
+        .name =  "Sayan J. Das",
+        .age = 69,
+        .friends = &[_][]const u8{
+            "Friend A", "Friend B", "Friend C"
+        }
+    };
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+        try txn.setSerialized("x", Person, me, @constCast(&buffer));
+        try txn.setSerialized("y", Person, me, @constCast(&buffer));
+        try txn.setSerialized("z", Person, me, @constCast(&buffer));
+
+        try txn.commit();
+    }
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+        try txn.delete("y");
+        try txn.setSerialized("x", Person, me, @constCast(&buffer));
+
+        try txn.commit();
+    }
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadOnly });
+        defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+        const deserStruct: ?Person = try txn.getSerializedAlloc("x", Person, allocator);
+
+        try std.testing.expectEqualStrings("Sayan J. Das", deserStruct.?.name);
+    }
+}
+
 test "multiple named databases" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

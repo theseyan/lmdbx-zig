@@ -11,7 +11,7 @@ const Transaction = @This();
 
 /// Transaction init options
 pub const Options = struct {
-    mode: Mode,
+    mode: Mode = .ReadWrite,
     parent: ?Transaction = null,
     txn_try: bool = false
 };
@@ -66,6 +66,25 @@ pub fn get(self: Transaction, key: []const u8) !?[]const u8 {
 pub fn set(self: Transaction, key: []const u8, value: []const u8) !void {
     const db = try Database.open(self, null, .{});
     try db.set(key, value);
+}
+
+/// Get a serialized record.
+pub fn getSerialized(self: Transaction, key: []const u8, comptime ValueType: type) !?ValueType {
+    const db = try Database.open(self, null, .{});
+    return try db.getSerialized(key, ValueType);
+}
+
+/// Get a serialized record.
+/// Allocators are required if points er involved.
+pub fn getSerializedAlloc(self: Transaction, key: []const u8, comptime ValueType: type, allocator: std.mem.Allocator) !?ValueType {
+    const db = try Database.open(self, null, .{});
+    return try db.getSerializedAlloc(key, ValueType, allocator);
+}
+
+/// Set a record by serializing Zig structs and values
+pub fn setSerialized(self: Transaction, key: []const u8, comptime ValueType: type, value: ValueType, buffer: anytype) !void {
+    const db = try Database.open(self, null, .{});
+    try db.setSerialized(key, ValueType, value, buffer);
 }
 
 /// Delete a record by key
