@@ -14,18 +14,36 @@ pub fn main() !void {
 
     _ = try log.write("## Benchmarks\n\n");
     try Context.exec("1k entries", 1_000, log, .{
-        // .lifo_reclaim = true,
+        .lifo_reclaim = false,
         .exclusive = true
     });
     _ = try log.write("\n");
     try Context.exec("50k entries", 50_000, log, .{
-        // .lifo_reclaim = true,
+        .lifo_reclaim = false,
+        .exclusive = true
+    });
+    _ = try log.write("\n");
+    try Context.exec("50k entries with LIFO", 50_000, log, .{
+        .lifo_reclaim = true,
         .exclusive = true
     });
     _ = try log.write("\n");
     try Context.exec("1m entries", 1_000_000, log, .{
-        // .lifo_reclaim = true,
+        .lifo_reclaim = false,
         .exclusive = true,
+    });
+    _ = try log.write("\n");
+    try Context.exec("1m entries with LIFO", 1_000_000, log, .{
+        .lifo_reclaim = true,
+        .exclusive = true,
+    });
+    _ = try log.write("\n");
+    try Context.exec("10m entries", 1_000_000_0, log, .{
+        .lifo_reclaim = false,
+        .exclusive = true,
+        .geometry = .{
+            .upper_size = 32 * 1024 * 1024 * 1024 // 32 GiB map size or it breaks with MDBX_MAP_FULL
+        }
     });
 }
 
@@ -124,6 +142,34 @@ const Context = struct {
         var runtimes: [iterations]f64 = undefined;
         var timer = try std.time.Timer.start();
 
+        // Pre-compute values for all iterations
+        var precomputed_values = try allocator.alloc([8]u8, iterations * batch_size);
+        defer allocator.free(precomputed_values);
+        
+        var precomputed_keys = try allocator.alloc([4]u8, iterations * batch_size);
+        defer allocator.free(precomputed_keys);
+
+        // Generate all values and keys
+        var seed: [12]u8 = undefined;
+        std.mem.writeInt(u32, seed[0..4], ctx.size, .big);
+
+        for (0..iterations) |i| {
+            std.mem.writeInt(u32, seed[4..8], @as(u32, @intCast(i)), .big);
+            const base_idx = i * batch_size;
+
+            // Generate batch_size different values and keys for each iteration
+            for (0..batch_size) |n| {
+                const idx = base_idx + n;
+                
+                // Generate unique key for this iteration and batch item
+                std.mem.writeInt(u32, &precomputed_keys[idx], random.uintLessThan(u32, ctx.size), .big);
+                
+                // Generate unique value using both iteration and batch item numbers
+                std.mem.writeInt(u32, seed[8..], @as(u32, @intCast(n)), .big);
+                std.crypto.hash.Blake3.hash(&seed, &precomputed_values[idx], .{});
+            }
+        }
+
         var operations: usize = 0;
         for (&runtimes, 0..) |*t, i| {
             timer.reset();
@@ -131,23 +177,16 @@ const Context = struct {
             const txn = try ctx.env.transaction(.{ .mode = .ReadWrite });
             errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: {any}", .{e});
 
-            var key: [4]u8 = undefined;
-            var seed: [12]u8 = undefined;
-            var value: [8]u8 = undefined;
+            const db = try txn.database(null, .{});
 
-            std.mem.writeInt(u32, seed[0..4], ctx.size, .big);
-            std.mem.writeInt(u32, seed[4..8], @as(u32, @intCast(i)), .big);
-
-            var n: u32 = 0;
-            while (n < batch_size) : (n += 1) {
-                std.mem.writeInt(u32, &key, random.uintLessThan(u32, ctx.size), .big);
-                std.mem.writeInt(u32, seed[8..], n, .big);
-                std.crypto.hash.Blake3.hash(&seed, &value, .{});
-                try txn.set(&key, &value);
+            // Use the precomputed values specific to this iteration
+            const base_idx = i * batch_size;
+            for (0..batch_size) |n| {
+                const idx = base_idx + n;
+                try db.set(&precomputed_keys[idx], &precomputed_values[idx]);
             }
 
             try txn.commit();
-            try ctx.env.sync();
 
             t.* = @as(f64, @floatFromInt(timer.read())) / ms;
             operations += batch_size;
@@ -183,7 +222,6 @@ const Context = struct {
                 }
             }
 
-            try ctx.env.sync();
             t.* = @as(f64, @floatFromInt(timer.read())) / ms;
         }
 
