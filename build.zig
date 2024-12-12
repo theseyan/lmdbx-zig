@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Set to true to development builds
 const IS_DEV = false;
@@ -6,16 +7,25 @@ const IS_DEV = false;
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
 
-    // For x86 target, we need .evex512 features.
-    // aarch64 has NEON which is (probably?) enough.
+    // Whether the target has avx512bw support
+    const has_avx512 = comptime builtin.cpu.features.isEnabled(@intFromEnum(std.Target.x86.Feature.avx512bw));
+    
+    // For x86 target, we need .evex512 features explicitly because of a Zig compiler bug.
+    // Relevant issue: https://github.com/ziglang/zig/issues/20414
+    // If target doesn't support avx512bw, disable SIMD optimizations completely.
+    // aarch64 always has NEON.
     const target_query = b.resolveTargetQuery(std.Target.Query{
         .cpu_arch = target.result.cpu.arch,
         .os_tag = target.result.os.tag,
         .abi = target.result.abi,
         .cpu_features_add = switch (target.result.cpu.arch) {
-            .x86_64 => std.Target.x86.featureSet(&[_]std.Target.x86.Feature{
-                .evex512
-            }),
+            .x86_64 => blk: {
+                if (!has_avx512) std.debug.print("Building without SIMD optimizations as target doesn't support avx512bw. This is a Zig compiler bug to be fixed in 0.14.\n", .{});
+
+                break :blk std.Target.x86.featureSet(&[_]std.Target.x86.Feature{
+                    if (has_avx512) .evex512 else @enumFromInt(target.result.cpu.features.ints[0])
+                });
+            },
             .aarch64 => target.result.cpu.features,
             else => std.Target.Cpu.Feature.Set.empty // Unknown CPU
         },
@@ -67,6 +77,12 @@ pub fn build(b: *std.Build) void {
             "-Wno-tautological-compare",
             "-DMDBX_BUILD_FLAGS=\"DNDEBUG=1\"",
             "-ULIBMDBX_EXPORTS",
+            
+            // Debug features
+            if (IS_DEV) "-DMDBX_DEBUG=2" else "-DMDBX_DEBUG=0",
+
+            // Disable SIMD optimizations if x86 and avx512bw not supported
+            if (target.result.cpu.arch == .x86_64 and !has_avx512) "-DMDBX_HAVE_BUILTIN_CPU_SUPPORTS=0" else "",
 
             // Cross compilation to windows breaks without "errno.h"
             if (target.result.os.tag == .windows) "-includeerrno.h" else "",
@@ -105,7 +121,7 @@ pub fn build(b: *std.Build) void {
     bench.linkLibC();
     bench.root_module.addImport("lmdbx", mdbx);
 
-    // b.installArtifact(bench);
+    b.installArtifact(bench);
 
     // Linker flags for libMDBX
     bench.link_gc_sections = true;
