@@ -75,7 +75,6 @@ pub fn build(b: *std.Build) void {
             "-fno-semantic-interposition",
             "-Wno-unused-command-line-argument",
             "-Wno-tautological-compare",
-            "-DMDBX_BUILD_FLAGS=\"DNDEBUG=1\"",
             "-ULIBMDBX_EXPORTS",
             
             // Debug features

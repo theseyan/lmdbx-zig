@@ -23,11 +23,6 @@ pub fn main() !void {
         .exclusive = true
     });
     _ = try log.write("\n");
-    try Context.exec("50k entries with LIFO", 50_000, log, .{
-        .lifo_reclaim = true,
-        .exclusive = true
-    });
-    _ = try log.write("\n");
     try Context.exec("1m entries", 1_000_000, log, .{
         .lifo_reclaim = false,
         .exclusive = true,
@@ -38,13 +33,13 @@ pub fn main() !void {
         .exclusive = true,
     });
     _ = try log.write("\n");
-    try Context.exec("10m entries", 1_000_000_0, log, .{
-        .lifo_reclaim = false,
-        .exclusive = true,
-        .geometry = .{
-            .upper_size = 32 * 1024 * 1024 * 1024 // 32 GiB map size or it breaks with MDBX_MAP_FULL
-        }
-    });
+    // try Context.exec("10m entries", 1_000_000_0, log, .{
+    //     .lifo_reclaim = false,
+    //     .exclusive = true,
+    //     .geometry = .{
+    //         .upper_size = 32 * 1024 * 1024 * 1024 // 32 GiB map size or it breaks with MDBX_MAP_FULL
+    //     }
+    // });
 }
 
 var path_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;

@@ -20,6 +20,7 @@ pub const Options = struct {
     lifo_reclaim: bool = false,
     no_meta_sync: bool = false,
     safe_nosync: bool = false,
+    unsafe_nosync: bool = false,
     mode: u16 = 0o664,
 };
 
@@ -87,6 +88,7 @@ pub fn init(path: [*:0]const u8, options: Options) !Environment {
     if (options.lifo_reclaim) flags |= c.MDBX_LIFORECLAIM;
     if (options.no_meta_sync) flags |= c.MDBX_NOMETASYNC;
     if (options.safe_nosync) flags |= c.MDBX_SAFE_NOSYNC;
+    if (options.unsafe_nosync) flags |= c.MDBX_UTTERLY_NOSYNC;
 
     try throw(c.mdbx_env_open(env.ptr, path, flags, options.mode));
 
