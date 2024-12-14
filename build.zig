@@ -1,11 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-// Set to true to development builds
-const IS_DEV = false;
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const IS_DEV = if (optimize == .Debug) true else false;
 
     // Whether the target has avx512bw support
     const has_avx512 = comptime builtin.cpu.features.isEnabled(@intFromEnum(std.Target.x86.Feature.avx512bw));
@@ -79,12 +79,16 @@ pub fn build(b: *std.Build) void {
             
             // Debug features
             if (IS_DEV) "-DMDBX_DEBUG=2" else "-DMDBX_DEBUG=0",
+            if (IS_DEV) "-DMDBX_BUILD_FLAGS=\"DNDEBUG=1\"" else "-DMDBX_BUILD_FLAGS=\"DNDEBUG=0\"",
 
             // Disable SIMD optimizations if x86 and avx512bw not supported
             if (target.result.cpu.arch == .x86_64 and !has_avx512) "-DMDBX_HAVE_BUILTIN_CPU_SUPPORTS=0" else "",
 
             // Cross compilation to windows breaks without "errno.h"
             if (target.result.os.tag == .windows) "-includeerrno.h" else "",
+
+            // We don't link with MSVC CRT
+            if (target.result.os.tag == .windows) "-DMDBX_WITHOUT_MSVC_CRT=1" else "",
 
             // Link libraries
             switch (target.result.os.tag) {
