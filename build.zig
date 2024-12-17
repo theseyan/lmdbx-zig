@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) void {
             
             // Debug features
             if (IS_DEV) "-DMDBX_DEBUG=2" else "-DMDBX_DEBUG=0",
-            if (IS_DEV) "-DMDBX_BUILD_FLAGS=\"DNDEBUG=1\"" else "-DMDBX_BUILD_FLAGS=\"DNDEBUG=0\"",
+            if (IS_DEV) "-DMDBX_BUILD_FLAGS=\"UNDEBUG\"" else "-DMDBX_BUILD_FLAGS=\"DNDEBUG=1\"",
 
             // Disable SIMD optimizations if x86 and avx512bw not supported
             if (target.result.cpu.arch == .x86_64 and !has_avx512) "-DMDBX_HAVE_BUILTIN_CPU_SUPPORTS=0" else "",
