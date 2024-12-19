@@ -1,6 +1,6 @@
 const std = @import("std");
-const allocator = std.heap.c_allocator;
 const lmdb = @import("lmdbx");
+const allocator = std.heap.c_allocator;
 
 const value_size = 8;
 
@@ -69,11 +69,15 @@ const Context = struct {
 
         try ctx.getRandomEntries("get random 1 entry", 100, 1);
         try ctx.getRandomEntries("get random 100 entries", 100, 100);
+        try ctx.getRandomEntries("get sequential 100 entries", 100, 100);
         try iterateEntries(ctx, 100);
         try ctx.setRandomEntries("set random 1 entry", 100, 1);
         try ctx.setRandomEntries("set random 100 entries", 100, 100);
+        try ctx.setSequentialEntries("set sequential 100 entries", 10, 100);
         try ctx.setRandomEntries("set random 1k entries", 10, 1_000);
+        try ctx.setSequentialEntries("set sequential 1k entries", 10, 1_000);
         try ctx.setRandomEntries("set random 50k entries", 10, 50_000);
+        try ctx.setSequentialEntries("set sequential 50k entries", 10, 50_000);
     }
 
     fn initialize(ctx: Context) !void {
@@ -133,6 +137,56 @@ const Context = struct {
         try ctx.printRow(name, &runtimes, operations);
     }
 
+    fn getSequentialEntries(ctx: Context, comptime name: []const u8, comptime iterations: u32, comptime batch_size: usize) !void {
+        var runtimes: [iterations]f64 = undefined;
+        var timer = try std.time.Timer.start();
+
+        // Pre-generate sorted keys for all iterations
+        var precomputed_keys = try allocator.alloc([4]u8, iterations * batch_size);
+        defer allocator.free(precomputed_keys);
+
+        // Generate all keys first
+        for (0..iterations) |i| {
+            const base_idx = i * batch_size;
+            
+            // Generate batch_size different keys for this iteration
+            for (0..batch_size) |n| {
+                const idx = base_idx + n;
+                std.mem.writeInt(u32, &precomputed_keys[idx], random.uintLessThan(u32, ctx.size), .big);
+            }
+
+            // Sort this iteration's batch of keys
+            const start = base_idx;
+            const end = start + batch_size;
+            std.mem.sort(u8, precomputed_keys[start..end], {}, struct {
+                fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                    return std.mem.lessThan(u8, a, b);
+                }
+            }.lessThan);
+        }
+
+        var operations: usize = 0;
+        for (&runtimes, 0..) |*t, i| {
+            timer.reset();
+            operations += batch_size;
+
+            const txn = try ctx.env.transaction(.{ .mode = .ReadOnly });
+            defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: {any}", .{e});
+
+            // Use the precomputed sorted keys for this iteration
+            const base_idx = i * batch_size;
+            for (0..batch_size) |n| {
+                const idx = base_idx + n;
+                const value = try txn.get(&precomputed_keys[idx]);
+                std.debug.assert(value.?.len == value_size);
+            }
+
+            t.* = @as(f64, @floatFromInt(timer.read())) / ms;
+        }
+
+        try ctx.printRow(name, &runtimes, operations);
+    }
+
     fn setRandomEntries(ctx: Context, comptime name: []const u8, comptime iterations: u32, comptime batch_size: usize) !void {
         var runtimes: [iterations]f64 = undefined;
         var timer = try std.time.Timer.start();
@@ -162,6 +216,97 @@ const Context = struct {
                 // Generate unique value using both iteration and batch item numbers
                 std.mem.writeInt(u32, seed[8..], @as(u32, @intCast(n)), .big);
                 std.crypto.hash.Blake3.hash(&seed, &precomputed_values[idx], .{});
+            }
+        }
+
+        var operations: usize = 0;
+        for (&runtimes, 0..) |*t, i| {
+            timer.reset();
+
+            const txn = try ctx.env.transaction(.{ .mode = .ReadWrite });
+            errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: {any}", .{e});
+
+            const db = try txn.database(null, .{});
+
+            // Use the precomputed values specific to this iteration
+            const base_idx = i * batch_size;
+            for (0..batch_size) |n| {
+                const idx = base_idx + n;
+                try db.set(&precomputed_keys[idx], &precomputed_values[idx]);
+            }
+
+            try txn.commit();
+
+            t.* = @as(f64, @floatFromInt(timer.read())) / ms;
+            operations += batch_size;
+        }
+
+        try ctx.printRow(name, &runtimes, operations);
+    }
+
+    fn setSequentialEntries(ctx: Context, comptime name: []const u8, comptime iterations: u32, comptime batch_size: usize) !void {
+        var runtimes: [iterations]f64 = undefined;
+        var timer = try std.time.Timer.start();
+
+        // Pre-compute values for all iterations
+        var precomputed_values = try allocator.alloc([8]u8, iterations * batch_size);
+        defer allocator.free(precomputed_values);
+        
+        var precomputed_keys = try allocator.alloc([4]u8, iterations * batch_size);
+        defer allocator.free(precomputed_keys);
+
+        // Generate all values and keys
+        var seed: [12]u8 = undefined;
+        std.mem.writeInt(u32, seed[0..4], ctx.size, .big);
+
+        for (0..iterations) |i| {
+            std.mem.writeInt(u32, seed[4..8], @as(u32, @intCast(i)), .big);
+            const base_idx = i * batch_size;
+
+            // Generate batch_size different values and keys for each iteration
+            for (0..batch_size) |n| {
+                const idx = base_idx + n;
+                
+                // Generate unique key for this iteration and batch item
+                std.mem.writeInt(u32, &precomputed_keys[idx], random.uintLessThan(u32, ctx.size), .big);
+                
+                // Generate unique value using both iteration and batch item numbers
+                std.mem.writeInt(u32, seed[8..], @as(u32, @intCast(n)), .big);
+                std.crypto.hash.Blake3.hash(&seed, &precomputed_values[idx], .{});
+            }
+
+            // Sort the batch for this iteration
+            const BatchItem = struct {
+                key: [4]u8,
+                value: [8]u8,
+                idx: usize,
+            };
+
+            var batch = try allocator.alloc(BatchItem, batch_size);
+            defer allocator.free(batch);
+
+            // Create batch items
+            for (0..batch_size) |n| {
+                const idx = base_idx + n;
+                batch[n] = .{
+                    .key = precomputed_keys[idx],
+                    .value = precomputed_values[idx],
+                    .idx = idx,
+                };
+            }
+
+            // Sort batch by key
+            std.mem.sort(BatchItem, batch, {}, struct {
+                fn lessThan(_: void, a: BatchItem, b: BatchItem) bool {
+                    return std.mem.lessThan(u8, &a.key, &b.key);
+                }
+            }.lessThan);
+
+            // Copy back sorted items
+            for (batch, 0..) |item, n| {
+                const idx = base_idx + n;
+                precomputed_keys[idx] = item.key;
+                precomputed_values[idx] = item.value;
             }
         }
 

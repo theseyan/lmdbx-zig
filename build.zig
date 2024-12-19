@@ -53,8 +53,8 @@ pub fn build(b: *std.Build) void {
     const mdbx_dep = b.dependency("mdbx", .{});
     mdbx.addIncludePath(mdbx_dep.path("."));
 
-    // Add polyfills needed to compile
-    mdbx.addIncludePath(b.path("src/polyfill"));
+    // Add headers needed to compile
+    mdbx.addIncludePath(b.path("src/headers"));
 
     // mdbx.c is amalgated source code
     mdbx.addCSourceFile(.{
@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) void {
             "-Wno-unused-command-line-argument",
             "-Wno-tautological-compare",
             "-ULIBMDBX_EXPORTS",
-            
+
             // Debug features
             if (IS_DEV) "-DMDBX_DEBUG=2" else "-DMDBX_DEBUG=0",
             if (IS_DEV) "-DMDBX_BUILD_FLAGS=\"UNDEBUG\"" else "-DMDBX_BUILD_FLAGS=\"DNDEBUG=1\"",
