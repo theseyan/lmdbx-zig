@@ -29,9 +29,9 @@ test "basic operations" {
         const txn = try env.transaction(.{ .mode = .ReadWrite });
         errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-        try txn.set("x", "foo");
-        try txn.set("y", "bar");
-        try txn.set("z", "baz");
+        try txn.set("x", "foo", .Upsert);
+        try txn.set("y", "bar", .Upsert);
+        try txn.set("z", "baz", .Upsert);
 
         try txn.commit();
     }
@@ -41,7 +41,7 @@ test "basic operations" {
         errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
         try txn.delete("y");
-        try txn.set("x", "FOO");
+        try txn.set("x", "FOO", .Upsert);
 
         try txn.commit();
     }
@@ -124,7 +124,7 @@ test "multiple named databases" {
         errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
         const db = try txn.database("a", .{ .create = true });
-        try db.set("x", "foo");
+        try db.set("x", "foo", .Upsert);
 
         try txn.commit();
     }
@@ -134,7 +134,7 @@ test "multiple named databases" {
         errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
         const db = try txn.database("b", .{ .create = true });
-        try db.set("x", "bar");
+        try db.set("x", "bar", .Upsert);
 
         try txn.commit();
     }
@@ -173,9 +173,9 @@ test "compareEntries" {
         const txn = try env_a.transaction(.{ .mode = .ReadWrite });
         errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-        try txn.set("x", "foo");
-        try txn.set("y", "bar");
-        try txn.set("z", "baz");
+        try txn.set("x", "foo", .Upsert);
+        try txn.set("y", "bar", .Upsert);
+        try txn.set("z", "baz", .Upsert);
 
         try txn.commit();
     }
@@ -190,8 +190,8 @@ test "compareEntries" {
         const txn = try env_b.transaction(.{ .mode = .ReadWrite });
         errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-        try txn.set("y", "bar");
-        try txn.set("z", "qux");
+        try txn.set("y", "bar", .Upsert);
+        try txn.set("z", "qux", .Upsert);
         try txn.commit();
     }
 
@@ -202,8 +202,8 @@ test "compareEntries" {
         const txn = try env_b.transaction(.{ .mode = .ReadWrite });
         errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-        try txn.set("x", "foo");
-        try txn.set("z", "baz");
+        try txn.set("x", "foo", .Upsert);
+        try txn.set("z", "baz", .Upsert);
         try txn.commit();
     }
 
@@ -221,7 +221,7 @@ test "set empty value" {
     const txn = try env.transaction(.{ .mode = .ReadWrite });
     defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-    try txn.set("a", "");
+    try txn.set("a", "", .Upsert);
 
     if (try txn.get("a")) |value| {
         try expect(value.len == 0);
@@ -278,10 +278,10 @@ test "Cursor.deleteCurrentKey()" {
         const txn = try env.transaction(.{ .mode = .ReadWrite });
         defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-        try txn.set("a", "foo");
-        try txn.set("b", "bar");
-        try txn.set("c", "baz");
-        try txn.set("d", "qux");
+        try txn.set("a", "foo", .Upsert);
+        try txn.set("b", "bar", .Upsert);
+        try txn.set("c", "baz", .Upsert);
+        try txn.set("d", "qux", .Upsert);
 
         {
             const cursor = try txn.cursor();
@@ -313,10 +313,10 @@ test "Cursor.seek" {
         const txn = try env.transaction(.{ .mode = .ReadWrite });
         defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-        try txn.set("a", "foo");
-        try txn.set("aa", "bar");
-        try txn.set("ab", "baz");
-        try txn.set("abb", "qux");
+        try txn.set("a", "foo", .Upsert);
+        try txn.set("aa", "bar", .Upsert);
+        try txn.set("ab", "baz", .Upsert);
+        try txn.set("abb", "qux", .Upsert);
 
         const cursor = try txn.cursor();
         defer cursor.deinit();
@@ -336,9 +336,9 @@ test "parent transactions" {
     const parent_txn = try env.transaction(.{ .mode = .ReadWrite });
     defer parent_txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-    try parent_txn.set("a", "foo");
-    try parent_txn.set("b", "bar");
-    try parent_txn.set("c", "baz");
+    try parent_txn.set("a", "foo", .Upsert);
+    try parent_txn.set("b", "bar", .Upsert);
+    try parent_txn.set("c", "baz", .Upsert);
 
     {
         const child_txn = try env.transaction(.{ .mode = .ReadWrite, .parent = parent_txn });
@@ -354,7 +354,7 @@ test "parent transactions" {
         const child_txn = try env.transaction(.{ .mode = .ReadWrite, .parent = parent_txn });
         defer child_txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-        try child_txn.set("c", "baz");
+        try child_txn.set("c", "baz", .Upsert);
     }
 
     try expectEqual(@as(?[]const u8, null), try parent_txn.get("c"));
@@ -393,7 +393,7 @@ fn setEntry(env: lmdb.Environment, i: u32) !void {
     const txn = try env.transaction(.{ .mode = .ReadWrite });
     std.mem.writeInt(u32, &key, i, .big);
     std.crypto.hash.Blake3.hash(&key, &value, .{});
-    try txn.set(&key, &value);
+    try txn.set(&key, &value, .Upsert);
 
     try txn.commit();
 }

@@ -30,6 +30,11 @@ pub const Stat = struct {
     entries: usize,
 };
 
+/// Set flags
+pub const SetFlag = enum {
+    Create, Update, Upsert, Append, AppendDup
+};
+
 txn: Transaction,
 dbi: DBI,
 
@@ -86,11 +91,20 @@ pub fn getSerialized(self: Database, key: []const u8, comptime ValueType: type) 
 }
 
 /// Set a record
-pub fn set(self: Database, key: []const u8, value: []const u8) !void {
+pub fn set(self: Database, key: []const u8, value: []const u8, flag: SetFlag) !void {
     var k: c.MDBX_val = .{ .iov_len = key.len, .iov_base = @as([*]u8, @ptrFromInt(@intFromPtr(key.ptr))) };
     var v: c.MDBX_val = .{ .iov_len = value.len, .iov_base = @as([*]u8, @ptrFromInt(@intFromPtr(value.ptr))) };
 
-    try throw(c.mdbx_put(self.txn.ptr, self.dbi, &k, &v, 0));
+    var flags: c_uint = 0;
+    switch (flag) {
+        .Upsert => {},
+        .Create => flags |= c.MDBX_NOOVERWRITE,
+        .Update => flags |= c.MDBX_CURRENT,
+        .Append => flags |= c.MDBX_APPEND,
+        .AppendDup => flags |= c.MDBX_APPENDDUP,
+    }
+
+    try throw(c.mdbx_put(self.txn.ptr, self.dbi, &k, &v, flags));
 }
 
 /// Set a record by serializing Zig structs and values

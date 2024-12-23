@@ -15,7 +15,7 @@ pub fn main() !void {
     _ = try log.write("## Benchmarks\n\n");
     try Context.exec("1k entries", 1_000, log, .{
         .lifo_reclaim = false,
-        .exclusive = true
+        .exclusive = true,
     });
     _ = try log.write("\n");
     try Context.exec("50k entries", 50_000, log, .{
@@ -91,7 +91,7 @@ const Context = struct {
         while (i < ctx.size) : (i += 1) {
             std.mem.writeInt(u32, &key, i, .big);
             std.crypto.hash.Blake3.hash(&key, &value, .{});
-            try txn.set(&key, &value);
+            try txn.set(&key, &value, .Upsert);
         }
 
         try txn.commit();
@@ -232,7 +232,7 @@ const Context = struct {
             const base_idx = i * batch_size;
             for (0..batch_size) |n| {
                 const idx = base_idx + n;
-                try db.set(&precomputed_keys[idx], &precomputed_values[idx]);
+                try db.set(&precomputed_keys[idx], &precomputed_values[idx], .Upsert);
             }
 
             try txn.commit();
@@ -318,14 +318,20 @@ const Context = struct {
             errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: {any}", .{e});
 
             const db = try txn.database(null, .{});
+            const cursor = try db.cursor();
+
+            _ = try cursor.goToFirst();
 
             // Use the precomputed values specific to this iteration
             const base_idx = i * batch_size;
             for (0..batch_size) |n| {
                 const idx = base_idx + n;
-                try db.set(&precomputed_keys[idx], &precomputed_values[idx]);
+                // try db.set(&precomputed_keys[idx], &precomputed_values[idx], .Upsert);
+                try cursor.set(&precomputed_keys[idx], &precomputed_values[idx]);
+                _ = try cursor.goToNext();
             }
 
+            cursor.deinit();
             try txn.commit();
 
             t.* = @as(f64, @floatFromInt(timer.read())) / ms;

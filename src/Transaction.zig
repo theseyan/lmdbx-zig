@@ -63,9 +63,9 @@ pub fn get(self: Transaction, key: []const u8) !?[]const u8 {
 }
 
 /// Set a record
-pub fn set(self: Transaction, key: []const u8, value: []const u8) !void {
+pub fn set(self: Transaction, key: []const u8, value: []const u8, flag: Database.SetFlag) !void {
     const db = try Database.open(self, null, .{});
-    try db.set(key, value);
+    try db.set(key, value, flag);
 }
 
 /// Get a serialized record.

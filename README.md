@@ -66,8 +66,8 @@ pub fn main() !void {
     const txn = try lmdbx.Transaction.init(env, .{ .mode = .ReadWrite });
     errdefer txn.abort();
 
-    try txn.set("aaa", "foo");
-    try txn.set("bbb", "bar");
+    try txn.set("aaa", "foo", .Create);
+    try txn.set("bbb", "bar", .Upsert);
 
     try txn.commit();
 }
@@ -86,10 +86,10 @@ pub fn main() !void {
     errdefer txn.abort();
 
     const widgets = try txn.database("widgets", .{ .create = true });
-    try widgets.set("aaa", "foo");
+    try widgets.set("aaa", "foo", .Create);
 
     const gadgets = try txn.database("gadgets", .{ .create = true });
-    try gadgets.set("aaa", "bar");
+    try gadgets.set("aaa", "bar", .Create);
 
     try txn.commit();
 }
@@ -168,7 +168,7 @@ pub const Transaction = struct {
     pub fn commit(self: Transaction) !void
 
     pub fn get(self: Transaction, key: []const u8) !?[]const u8
-    pub fn set(self: Transaction, key: []const u8, value: []const u8) !void
+    pub fn set(self: Transaction, key: []const u8, value: []const u8, flag: Database.SetFlag) !void
     pub fn delete(self: Transaction, key: []const u8) !void
 
     pub fn cursor(self: Database) !Cursor
@@ -195,10 +195,14 @@ pub const Database = struct {
         entries: usize,
     };
 
+    pub const SetFlag = enum {
+        Create, Update, Upsert, Append, AppendDup
+    };
+
     pub fn open(txn: Transaction, name: ?[*:0]const u8, options: Options) !Database
 
     pub fn get(self: Database, key: []const u8) !?[]const u8
-    pub fn set(self: Database, key: []const u8, value: []const u8) !void
+    pub fn set(self: Database, key: []const u8, value: []const u8, flag: SetFlag) !void
     pub fn delete(self: Database, key: []const u8) !void
 
     pub fn cursor(self: Database) !Cursor
@@ -220,6 +224,7 @@ pub const Cursor = struct {
     pub fn getCurrentKey(self: Cursor) ![]const u8
     pub fn getCurrentValue(self: Cursor) ![]const u8
 
+    pub fn set(self: Cursor, key: []const u8, value: []const u8) !void
     pub fn setCurrentValue(self: Cursor, value: []const u8) !void
     pub fn deleteCurrentKey(self: Cursor) !void
 
