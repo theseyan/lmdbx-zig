@@ -60,9 +60,9 @@ pub fn free(allocator: std.mem.Allocator, comptime T: type, value: *T) void {
 fn serializeRecursive(stream: anytype, comptime T: type, value: T) @TypeOf(stream).Error!void {
     switch (@typeInfo(T)) {
         // Primitive types:
-        .Void => {}, // no data
-        .Bool => try stream.writeByte(@intFromBool(value)),
-        .Float => switch (T) {
+        .void => {}, // no data
+        .bool => try stream.writeByte(@intFromBool(value)),
+        .float => switch (T) {
             f16 => try stream.writeInt(u16, @bitCast(value), .little),
             f32 => try stream.writeInt(u32, @bitCast(value), .little),
             f64 => try stream.writeInt(u64, @bitCast(value), .little),
@@ -71,18 +71,18 @@ fn serializeRecursive(stream: anytype, comptime T: type, value: T) @TypeOf(strea
             else => unreachable,
         },
 
-        .Int => {
+        .int => {
             if (T == usize) {
                 try stream.writeInt(u64, value, .little);
             } else {
                 try stream.writeInt(AlignedInt(T), value, .little);
             }
         },
-        .Pointer => |ptr| {
-            if (ptr.sentinel != null) @compileError("Sentinels are not supported yet!");
+        .pointer => |ptr| {
+            if (ptr.sentinel() != null) @compileError("Sentinels are not supported yet!");
             switch (ptr.size) {
-                .One => try serializeRecursive(stream, ptr.child, value.*),
-                .Slice => {
+                .one => try serializeRecursive(stream, ptr.child, value.*),
+                .slice => {
                     try stream.writeInt(u64, value.len, .little);
                     if (ptr.child == u8) {
                         try stream.writeAll(value);
@@ -92,11 +92,11 @@ fn serializeRecursive(stream: anytype, comptime T: type, value: T) @TypeOf(strea
                         }
                     }
                 },
-                .C => unreachable,
-                .Many => unreachable,
+                .c => unreachable,
+                .many => unreachable,
             }
         },
-        .Array => |arr| {
+        .array => |arr| {
             if (arr.child == u8) {
                 try stream.writeAll(&value);
             } else {
@@ -104,9 +104,9 @@ fn serializeRecursive(stream: anytype, comptime T: type, value: T) @TypeOf(strea
                     try serializeRecursive(stream, arr.child, item);
                 }
             }
-            if (arr.sentinel != null) @compileError("Sentinels are not supported yet!");
+            if (arr.sentinel() != null) @compileError("Sentinels are not supported yet!");
         },
-        .@"Struct" => |str| {
+        .@"struct" => |str| {
             // we can safely ignore the struct layout here as we will serialize the data by field order,
             // instead of memory representation
 
@@ -114,7 +114,7 @@ fn serializeRecursive(stream: anytype, comptime T: type, value: T) @TypeOf(strea
                 try serializeRecursive(stream, fld.type, @field(value, fld.name));
             }
         },
-        .Optional => |opt| {
+        .optional => |opt| {
             if (value) |item| {
                 try stream.writeInt(u8, 1, .little);
                 try serializeRecursive(stream, opt.child, item);
@@ -122,7 +122,7 @@ fn serializeRecursive(stream: anytype, comptime T: type, value: T) @TypeOf(strea
                 try stream.writeInt(u8, 0, .little);
             }
         },
-        .ErrorUnion => |eu| {
+        .error_union => |eu| {
             if (value) |item| {
                 try stream.writeInt(u8, 1, .little);
                 try serializeRecursive(stream, eu.payload, item);
@@ -131,7 +131,7 @@ fn serializeRecursive(stream: anytype, comptime T: type, value: T) @TypeOf(strea
                 try serializeRecursive(stream, eu.error_set, item);
             }
         },
-        .ErrorSet => {
+        .error_set => {
             // Error unions are serialized by "index of sorted name", so we
             // hash all names in the right order
             const names = comptime getSortedErrorNames(T);
@@ -143,11 +143,11 @@ fn serializeRecursive(stream: anytype, comptime T: type, value: T) @TypeOf(strea
 
             try stream.writeInt(u16, index, .little);
         },
-        .@"Enum" => |list| {
+        .@"enum" => |list| {
             const Tag = if (list.tag_type == usize) u64 else list.tag_type;
             try stream.writeInt(AlignedInt(Tag), @intFromEnum(value), .little);
         },
-        .@"Union" => |un| {
+        .@"union" => |un| {
             const Tag = un.tag_type orelse @compileError("Untagged unions are not supported!");
 
             const active_tag = std.meta.activeTag(value);
@@ -160,23 +160,23 @@ fn serializeRecursive(stream: anytype, comptime T: type, value: T) @TypeOf(strea
                 }
             }
         },
-        .Vector => |vec| {
+        .vector => |vec| {
             const array: [vec.len]vec.child = value;
             try serializeRecursive(stream, @TypeOf(array), array);
         },
 
         // Unsupported types:
-        .NoReturn,
-        .Type,
-        .ComptimeFloat,
-        .ComptimeInt,
-        .Undefined,
-        .Null,
-        .@"Fn",
-        .@"Opaque",
-        .Frame,
-        .@"AnyFrame",
-        .EnumLiteral,
+        .noreturn,
+        .type,
+        .comptime_float,
+        .comptime_int,
+        .undefined,
+        .null,
+        .@"fn",
+        .@"opaque",
+        .frame,
+        .@"anyframe",
+        .enum_literal,
         => unreachable,
     }
 }
@@ -211,9 +211,9 @@ fn recursiveDeserialize(
 ) (@TypeOf(stream).Error || error{ UnexpectedData, OutOfMemory, EndOfStream })!void {
     switch (@typeInfo(T)) {
         // Primitive types:
-        .Void => target.* = {},
-        .Bool => target.* = (try stream.readByte()) != 0,
-        .Float => target.* = @bitCast(switch (T) {
+        .void => target.* = {},
+        .bool => target.* = (try stream.readByte()) != 0,
+        .float => target.* = @bitCast(switch (T) {
             f16 => try stream.readInt(u16, .little),
             f32 => try stream.readInt(u32, .little),
             f64 => try stream.readInt(u64, .little),
@@ -222,15 +222,15 @@ fn recursiveDeserialize(
             else => unreachable,
         }),
 
-        .Int => target.* = if (T == usize)
+        .int => target.* = if (T == usize)
             std.math.cast(usize, try stream.readInt(u64, .little)) orelse return error.UnexpectedData
         else
             @truncate(try stream.readInt(AlignedInt(T), .little)),
 
-        .Pointer => |ptr| {
-            if (ptr.sentinel != null) @compileError("Sentinels are not supported yet!");
+        .pointer => |ptr| {
+            if (ptr.sentinel() != null) @compileError("Sentinels are not supported yet!");
             switch (ptr.size) {
-                .One => {
+                .one => {
                     const pointer = try allocator.?.create(ptr.child);
                     errdefer allocator.?.destroy(pointer);
 
@@ -238,7 +238,7 @@ fn recursiveDeserialize(
 
                     target.* = pointer;
                 },
-                .Slice => {
+                .slice => {
                     const length = std.math.cast(usize, try stream.readInt(u64, .little)) orelse return error.UnexpectedData;
 
                     const slice = try allocator.?.alloc(ptr.child, length);
@@ -254,11 +254,11 @@ fn recursiveDeserialize(
 
                     target.* = slice;
                 },
-                .C => unreachable,
-                .Many => unreachable,
+                .c => unreachable,
+                .many => unreachable,
             }
         },
-        .Array => |arr| {
+        .array => |arr| {
             if (arr.child == u8) {
                 try stream.readNoEof(target);
             } else {
@@ -267,7 +267,7 @@ fn recursiveDeserialize(
                 }
             }
         },
-        .@"Struct" => |str| {
+        .@"struct" => |str| {
             // we can safely ignore the struct layout here as we will serialize the data by field order,
             // instead of memory representation
 
@@ -275,7 +275,7 @@ fn recursiveDeserialize(
                 try recursiveDeserialize(stream, fld.type, allocator, &@field(target.*, fld.name));
             }
         },
-        .Optional => |opt| {
+        .optional => |opt| {
             const is_set = try stream.readInt(u8, .little);
 
             if (is_set != 0) {
@@ -285,7 +285,7 @@ fn recursiveDeserialize(
                 target.* = null;
             }
         },
-        .ErrorUnion => |eu| {
+        .error_union => |eu| {
             const is_value = try stream.readInt(u8, .little);
             if (is_value != 0) {
                 var value: eu.payload = undefined;
@@ -297,7 +297,7 @@ fn recursiveDeserialize(
                 target.* = err;
             }
         },
-        .ErrorSet => {
+        .error_set => {
             // Error unions are serialized by "index of sorted name", so we
             // hash all names in the right order
             const names = comptime getSortedErrorNames(T);
@@ -308,7 +308,7 @@ fn recursiveDeserialize(
                 else => return error.UnexpectedData,
             }
         },
-        .@"Enum" => |list| {
+        .@"enum" => |list| {
             const Tag = if (list.tag_type == usize) u64 else list.tag_type;
             const tag_value: Tag = @truncate(try stream.readInt(AlignedInt(Tag), .little));
             if (list.is_exhaustive) {
@@ -317,7 +317,7 @@ fn recursiveDeserialize(
                 target.* = @enumFromInt(tag_value);
             }
         },
-        .@"Union" => |un| {
+        .@"union" => |un| {
             const Tag = un.tag_type orelse @compileError("Untagged unions are not supported!");
 
             var active_tag: Tag = undefined;
@@ -334,24 +334,24 @@ fn recursiveDeserialize(
 
             return error.UnexpectedData;
         },
-        .Vector => |vec| {
+        .vector => |vec| {
             var array: [vec.len]vec.child = undefined;
             try recursiveDeserialize(stream, @TypeOf(array), allocator, &array);
             target.* = array;
         },
 
         // Unsupported types:
-        .NoReturn,
-        .Type,
-        .ComptimeFloat,
-        .ComptimeInt,
-        .Undefined,
-        .Null,
-        .@"Fn",
-        .@"Opaque",
-        .Frame,
-        .@"AnyFrame",
-        .EnumLiteral,
+        .noreturn,
+        .type,
+        .comptime_float,
+        .comptime_int,
+        .undefined,
+        .null,
+        .@"fn",
+        .@"opaque",
+        .frame,
+        .@"anyframe",
+        .enum_literal,
         => unreachable,
     }
 }
@@ -373,20 +373,20 @@ fn recursiveFree(allocator: std.mem.Allocator, comptime T: type, value: *T) void
         // Composite types:
         .pointer => |ptr| {
             switch (ptr.size) {
-                .One => {
+                .one => {
                     const mut_ptr = @constCast(value.*);
                     recursiveFree(allocator, ptr.child, mut_ptr);
                     allocator.destroy(mut_ptr);
                 },
-                .Slice => {
+                .slice => {
                     const mut_slice = makeMutableSlice(ptr.child, value.*);
                     for (mut_slice) |*item| {
                         recursiveFree(allocator, ptr.child, item);
                     }
                     allocator.free(mut_slice);
                 },
-                .C => unreachable,
-                .Many => unreachable,
+                .c => unreachable,
+                .many => unreachable,
             }
         },
         .array => |arr| {
@@ -452,8 +452,8 @@ fn recursiveFree(allocator: std.mem.Allocator, comptime T: type, value: *T) void
 /// Returns `true` if `T` requires allocation to be deserialized.
 fn requiresAllocationForDeserialize(comptime T: type) bool {
     switch (@typeInfo(T)) {
-        .Pointer => return true,
-        .@"Struct", .@"Union" => {
+        .pointer => return true,
+        .@"struct", .@"union" => {
             inline for (comptime std.meta.fields(T)) |fld| {
                 if (requiresAllocationForDeserialize(fld.type)) {
                     return true;
@@ -461,7 +461,7 @@ fn requiresAllocationForDeserialize(comptime T: type) bool {
             }
             return false;
         },
-        .ErrorUnion => |eu| return requiresAllocationForDeserialize(eu.payload),
+        .error_union => |eu| return requiresAllocationForDeserialize(eu.payload),
         else => return false,
     }
 }
@@ -528,12 +528,12 @@ fn computeTypeHashInternal(hasher: *TypeHashFn, comptime T: type) void {
     @setEvalBranchQuota(10_000);
     switch (@typeInfo(T)) {
         // Primitive types:
-        .Void,
-        .Bool,
-        .Float,
+        .void,
+        .bool,
+        .float,
         => hasher.update(@typeName(T)),
 
-        .Int => {
+        .int => {
             if (T == usize) {
                 // special case: usize can differ between platforms, this
                 // format uses u64 internally.
@@ -542,28 +542,28 @@ fn computeTypeHashInternal(hasher: *TypeHashFn, comptime T: type) void {
                 hasher.update(@typeName(T));
             }
         },
-        .Pointer => |ptr| {
+        .pointer => |ptr| {
             if (ptr.is_volatile) @compileError("Serializing volatile pointers is most likely a mistake.");
-            if (ptr.sentinel != null) @compileError("Sentinels are not supported yet!");
+            if (ptr.sentinel() != null) @compileError("Sentinels are not supported yet!");
             switch (ptr.size) {
-                .One => {
+                .one => {
                     hasher.update("pointer");
                     computeTypeHashInternal(hasher, ptr.child);
                 },
-                .Slice => {
+                .slice => {
                     hasher.update("slice");
                     computeTypeHashInternal(hasher, ptr.child);
                 },
-                .C => @compileError("C-pointers are not supported"),
-                .Many => @compileError("Many-pointers are not supported"),
+                .c => @compileError("C-pointers are not supported"),
+                .many => @compileError("Many-pointers are not supported"),
             }
         },
-        .Array => |arr| {
-            if (arr.sentinel != null) @compileError("Sentinels are not supported yet!");
+        .array => |arr| {
+            if (arr.sentinel() != null) @compileError("Sentinels are not supported yet!");
             hasher.update(&intToLittleEndianBytes(@as(u64, arr.len)));
             computeTypeHashInternal(hasher, arr.child);
         },
-        .@"Struct" => |str| {
+        .@"struct" => |str| {
             // we can safely ignore the struct layout here as we will serialize the data by field order,
             // instead of memory representation
 
@@ -576,16 +576,16 @@ fn computeTypeHashInternal(hasher: *TypeHashFn, comptime T: type) void {
                 computeTypeHashInternal(hasher, fld.type);
             }
         },
-        .Optional => |opt| {
-           hasher.update("optional");
+        .optional => |opt| {
+            hasher.update("optional");
             computeTypeHashInternal(hasher, opt.child);
         },
-        .ErrorUnion => |eu| {
+        .error_union => |eu| {
             hasher.update("error union");
             computeTypeHashInternal(hasher, eu.error_set);
             computeTypeHashInternal(hasher, eu.payload);
         },
-        .ErrorSet => {
+        .error_set => {
             // Error unions are serialized by "index of sorted name", so we
             // hash all names in the right order
 
@@ -595,7 +595,7 @@ fn computeTypeHashInternal(hasher: *TypeHashFn, comptime T: type) void {
                 hasher.update(name);
             }
         },
-        .@"Enum" => |list| {
+        .@"enum" => |list| {
             const Tag = if (list.tag_type == usize)
                 u64
             else if (list.tag_type == isize)
@@ -618,7 +618,7 @@ fn computeTypeHashInternal(hasher: *TypeHashFn, comptime T: type) void {
                 computeTypeHashInternal(hasher, Tag);
             }
         },
-        .@"Union" => |un| {
+        .@"union" => |un| {
             const tag = un.tag_type orelse @compileError("Untagged unions are not supported!");
             hasher.update("union");
             computeTypeHashInternal(hasher, tag);
@@ -626,24 +626,24 @@ fn computeTypeHashInternal(hasher: *TypeHashFn, comptime T: type) void {
                 computeTypeHashInternal(hasher, fld.type);
             }
         },
-        .Vector => |vec| {
+        .vector => |vec| {
             hasher.update("vector");
             hasher.update(&intToLittleEndianBytes(@as(u64, vec.len)));
             computeTypeHashInternal(hasher, vec.child);
         },
 
         // Unsupported types:
-        .NoReturn,
-        .Type,
-        .ComptimeFloat,
-        .ComptimeInt,
-        .Undefined,
-        .Null,
-        .@"Fn",
-        .@"Opaque",
-        .Frame,
-        .@"AnyFrame",
-        .EnumLiteral,
+        .noreturn,
+        .type,
+        .comptime_float,
+        .comptime_int,
+        .undefined,
+        .null,
+        .@"fn",
+        .@"opaque",
+        .frame,
+        .@"anyframe",
+        .enum_literal,
         => @compileError("Unsupported type " ++ @typeName(T)),
     }
 }
@@ -652,8 +652,8 @@ fn validateTopLevelType(comptime T: type) void {
     switch (@typeInfo(T)) {
 
         // Unsupported top level types:
-        .ErrorSet,
-        .ErrorUnion,
+        .error_set,
+        .error_union,
         => @compileError("Unsupported top level type " ++ @typeName(T) ++ ". Wrap into struct to serialize these."),
 
         else => {},

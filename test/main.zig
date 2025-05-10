@@ -10,7 +10,7 @@ const compare = @import("compare.zig");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 var allocator = gpa.allocator();
 
-var path_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
 fn open(dir: std.fs.Dir, options: lmdb.Environment.Options) !lmdb.Environment {
     const path = try dir.realpath(".", &path_buffer);
@@ -67,19 +67,9 @@ test "serialized operations" {
     // A shared 4KiB buffer for serializing
     var buffer: [4096]u8 = undefined;
 
-    const Person = struct {
-        name: []const u8,
-        age: u8,
-        friends: []const []const u8
-    };
+    const Person = struct { name: []const u8, age: u8, friends: []const []const u8 };
 
-    const me = Person{
-        .name =  "Sayan J. Das",
-        .age = 69,
-        .friends = &[_][]const u8{
-            "Friend A", "Friend B", "Friend C"
-        }
-    };
+    const me = Person{ .name = "Sayan J. Das", .age = 69, .friends = &[_][]const u8{ "Friend A", "Friend B", "Friend C" } };
 
     {
         const txn = try env.transaction(.{ .mode = .ReadWrite });
