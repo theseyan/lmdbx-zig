@@ -4,7 +4,7 @@ const allocator = std.heap.c_allocator;
 
 const value_size = 8;
 
-var prng = std.rand.DefaultPrng.init(0x0000000000000000);
+var prng = std.Random.DefaultPrng.init(0x0000000000000000);
 var random = prng.random();
 
 const ms: f64 = 1_000_000.0;
@@ -20,7 +20,7 @@ pub fn main() !void {
     _ = try log.write("\n");
     try Context.exec("50k entries", 50_000, log, .{
         .lifo_reclaim = false,
-        .exclusive = true
+        .exclusive = true,
     });
     _ = try log.write("\n");
     try Context.exec("1m entries", 1_000_000, log, .{
@@ -33,16 +33,9 @@ pub fn main() !void {
         .exclusive = true,
     });
     _ = try log.write("\n");
-    // try Context.exec("10m entries", 1_000_000_0, log, .{
-    //     .lifo_reclaim = false,
-    //     .exclusive = true,
-    //     .geometry = .{
-    //         .upper_size = 32 * 1024 * 1024 * 1024 // 32 GiB map size or it breaks with MDBX_MAP_FULL
-    //     }
-    // });
 }
 
-var path_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
 fn open(dir: std.fs.Dir, options: lmdb.Environment.Options) !lmdb.Environment {
     const path = try dir.realpath(".", &path_buffer);
@@ -148,7 +141,7 @@ const Context = struct {
         // Generate all keys first
         for (0..iterations) |i| {
             const base_idx = i * batch_size;
-            
+
             // Generate batch_size different keys for this iteration
             for (0..batch_size) |n| {
                 const idx = base_idx + n;
@@ -194,7 +187,7 @@ const Context = struct {
         // Pre-compute values for all iterations
         var precomputed_values = try allocator.alloc([8]u8, iterations * batch_size);
         defer allocator.free(precomputed_values);
-        
+
         var precomputed_keys = try allocator.alloc([4]u8, iterations * batch_size);
         defer allocator.free(precomputed_keys);
 
@@ -209,10 +202,10 @@ const Context = struct {
             // Generate batch_size different values and keys for each iteration
             for (0..batch_size) |n| {
                 const idx = base_idx + n;
-                
+
                 // Generate unique key for this iteration and batch item
                 std.mem.writeInt(u32, &precomputed_keys[idx], random.uintLessThan(u32, ctx.size), .big);
-                
+
                 // Generate unique value using both iteration and batch item numbers
                 std.mem.writeInt(u32, seed[8..], @as(u32, @intCast(n)), .big);
                 std.crypto.hash.Blake3.hash(&seed, &precomputed_values[idx], .{});
@@ -251,7 +244,7 @@ const Context = struct {
         // Pre-compute values for all iterations
         var precomputed_values = try allocator.alloc([8]u8, iterations * batch_size);
         defer allocator.free(precomputed_values);
-        
+
         var precomputed_keys = try allocator.alloc([4]u8, iterations * batch_size);
         defer allocator.free(precomputed_keys);
 
@@ -266,10 +259,10 @@ const Context = struct {
             // Generate batch_size different values and keys for each iteration
             for (0..batch_size) |n| {
                 const idx = base_idx + n;
-                
+
                 // Generate unique key for this iteration and batch item
                 std.mem.writeInt(u32, &precomputed_keys[idx], random.uintLessThan(u32, ctx.size), .big);
-                
+
                 // Generate unique value using both iteration and batch item numbers
                 std.mem.writeInt(u32, seed[8..], @as(u32, @intCast(n)), .big);
                 std.crypto.hash.Blake3.hash(&seed, &precomputed_values[idx], .{});
@@ -318,20 +311,15 @@ const Context = struct {
             errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: {any}", .{e});
 
             const db = try txn.database(null, .{});
-            const cursor = try db.cursor();
-
-            _ = try cursor.goToFirst();
 
             // Use the precomputed values specific to this iteration
             const base_idx = i * batch_size;
             for (0..batch_size) |n| {
                 const idx = base_idx + n;
-                // try db.set(&precomputed_keys[idx], &precomputed_values[idx], .Upsert);
-                try cursor.set(&precomputed_keys[idx], &precomputed_values[idx]);
-                _ = try cursor.goToNext();
+                try db.set(&precomputed_keys[idx], &precomputed_values[idx], .Upsert);
             }
 
-            cursor.deinit();
+            // cursor.deinit();
             try txn.commit();
 
             t.* = @as(f64, @floatFromInt(timer.read())) / ms;

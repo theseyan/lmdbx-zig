@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
 
     // Whether the target has avx512bw support
     const has_avx512 = comptime builtin.cpu.features.isEnabled(@intFromEnum(std.Target.x86.Feature.avx512bw));
-    
+
     // For x86 target, we need .evex512 features explicitly because of a Zig compiler bug.
     // Relevant issue: https://github.com/ziglang/zig/issues/20414
     // If target doesn't support avx512bw, disable SIMD optimizations completely.
@@ -22,12 +22,10 @@ pub fn build(b: *std.Build) void {
             .x86_64 => blk: {
                 if (!has_avx512) std.debug.print("Building without SIMD optimizations as target doesn't support avx512bw. This is a Zig compiler bug to be fixed in 0.14.\n", .{});
 
-                break :blk std.Target.x86.featureSet(&[_]std.Target.x86.Feature{
-                    if (has_avx512) .evex512 else break :blk std.Target.Cpu.Feature.Set.empty
-                });
+                break :blk std.Target.x86.featureSet(&[_]std.Target.x86.Feature{if (has_avx512) .evex512 else break :blk std.Target.Cpu.Feature.Set.empty});
             },
             .aarch64 => target.result.cpu.features,
-            else => std.Target.Cpu.Feature.Set.empty // Unknown CPU
+            else => std.Target.Cpu.Feature.Set.empty, // Unknown CPU
         },
     });
 
@@ -39,14 +37,11 @@ pub fn build(b: *std.Build) void {
     mdbx.addIncludePath(cpuf_dep.path("cpu_model"));
 
     if (target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64) {
-        mdbx.addCSourceFile(.{
-            .file = switch (target.result.cpu.arch) {
-                .x86_64 => cpuf_dep.path("cpu_model/x86.c"),
-                .aarch64 => cpuf_dep.path("cpu_model/aarch64.c"),
-                else => unreachable
-            },
-            .flags = &.{}
-        });
+        mdbx.addCSourceFile(.{ .file = switch (target.result.cpu.arch) {
+            .x86_64 => cpuf_dep.path("cpu_model/x86.c"),
+            .aarch64 => cpuf_dep.path("cpu_model/aarch64.c"),
+            else => unreachable,
+        }, .flags = &.{} });
     }
 
     // libMDBX
@@ -63,7 +58,7 @@ pub fn build(b: *std.Build) void {
             "-std=gnu11",
             "-O2",
             "-g",
-            "-Wall",
+            // "-Wall",
             // These flags are recommended, but breaks Windows compilation
             // "-Werror",
             // "-Wextra",
@@ -75,6 +70,7 @@ pub fn build(b: *std.Build) void {
             "-fno-semantic-interposition",
             "-Wno-unused-command-line-argument",
             "-Wno-tautological-compare",
+            "-Wno-date-time",
             "-ULIBMDBX_EXPORTS",
 
             // Debug features
@@ -94,9 +90,9 @@ pub fn build(b: *std.Build) void {
             switch (target.result.os.tag) {
                 .windows => "-lm -lntdll -lwinmm -luser32 -lkernel32 -ladvapi32 -lole32",
                 .macos, .openbsd => "-lm",
-                else => "-lm -lrt"
+                else => "-lm -lrt",
             },
-        }
+        },
     });
 
     mdbx.pic = true; // Enforce PIC
@@ -129,12 +125,6 @@ pub fn build(b: *std.Build) void {
     // Linker flags for libMDBX
     bench.link_gc_sections = true;
     bench.link_z_relro = true;
-
-    // Enforce LTO
-    bench.want_lto = switch (target.result.os.tag) {
-        .macos => false, // Cross-compilation breaks on macOS LTO
-        else => if (IS_DEV) false else true
-    };
 
     const bench_runner = b.addRunArtifact(bench);
     b.step("bench", "Run libMDBX benchmarks").dependOn(&bench_runner.step);
