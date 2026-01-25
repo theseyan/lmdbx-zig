@@ -102,6 +102,112 @@ test "serialized operations" {
     }
 }
 
+test "batched io basic and concurrent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    var bio = lmdb.BatchedIO.init(env, .{ .sync_interval_ms = 1 });
+    try bio.start(.{ .sync_interval_ms = 1 });
+    defer bio.deinit();
+
+    {
+        var txn = try bio.beginWrite();
+        try txn.set("k1", "v1", .Upsert);
+        try txn.commit();
+    }
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadOnly });
+        defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const v = try txn.get("k1");
+        try expect(v != null);
+        try expectEqualSlices(u8, "v1", v.?);
+    }
+
+    var t1 = try std.Thread.spawn(.{}, struct {
+        fn run(bio_ptr: *lmdb.BatchedIO, key: []const u8, value: []const u8) void {
+            var txn = bio_ptr.beginWrite() catch @panic("batched begin failed");
+            txn.set(key, value, .Upsert) catch @panic("batched set failed");
+            txn.commit() catch @panic("batched commit failed");
+        }
+    }.run, .{ &bio, "k2", "v2" });
+
+    var t2 = try std.Thread.spawn(.{}, struct {
+        fn run(bio_ptr: *lmdb.BatchedIO, key: []const u8, value: []const u8) void {
+            var txn = bio_ptr.beginWrite() catch @panic("batched begin failed");
+            txn.set(key, value, .Upsert) catch @panic("batched set failed");
+            txn.commit() catch @panic("batched commit failed");
+        }
+    }.run, .{ &bio, "k3", "v3" });
+
+    t1.join();
+    t2.join();
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadOnly });
+        defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const v2 = try txn.get("k2");
+        const v3 = try txn.get("k3");
+        try expect(v2 != null);
+        try expect(v3 != null);
+        try expectEqualSlices(u8, "v2", v2.?);
+        try expectEqualSlices(u8, "v3", v3.?);
+    }
+}
+
+test "batched io commit async callback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    var bio = lmdb.BatchedIO.init(env, .{ .sync_interval_ms = 1, .callback_capacity = 16 });
+    try bio.start(.{ .sync_interval_ms = 1, .callback_capacity = 16 });
+    defer bio.deinit();
+
+    const Ctx = struct {
+        called: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    };
+    var ctx = Ctx{};
+
+    const cb = struct {
+        fn run(ptr: ?*anyopaque) void {
+            const c = @as(*Ctx, @ptrCast(@alignCast(ptr.?)));
+            _ = c.called.fetchAdd(1, .acq_rel);
+        }
+    }.run;
+
+    {
+        var txn = try bio.beginWrite();
+        try txn.set("ka", "va", .Upsert);
+        try txn.commitAsync(cb, &ctx);
+    }
+    {
+        var txn = try bio.beginWrite();
+        try txn.set("kb", "vb", .Upsert);
+        try txn.commitAsync(cb, &ctx);
+    }
+
+    // Wait for callbacks to fire (sync thread).
+    var spins: u32 = 0;
+    while (ctx.called.load(.acquire) < 2 and spins < 1000) : (spins += 1) {
+        std.Thread.sleep(1_000_000);
+    }
+
+    try expectEqual(@as(u32, 2), ctx.called.load(.acquire));
+
+    const txn = try env.transaction(.{ .mode = .ReadOnly });
+    defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+    const va = try txn.get("ka");
+    const vb = try txn.get("kb");
+    try expectEqualSlices(u8, "va", va.?);
+    try expectEqualSlices(u8, "vb", vb.?);
+}
+
 test "multiple named databases" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

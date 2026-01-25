@@ -18,27 +18,36 @@ pub fn main() !void {
     try Context.exec("1k entries", 1_000, &log.interface, .{
         .lifo_reclaim = false,
         .exclusive = true,
+        .sync_durable = true,
+        .safe_nosync = true,
+        .sync_period_ms = 5,
     });
     try log.interface.flush();
     _ = try log.interface.write("\n");
     try Context.exec("50k entries", 50_000, &log.interface, .{
         .lifo_reclaim = false,
         .exclusive = true,
+        .sync_durable = true,
+        .safe_nosync = true,
+        .sync_period_ms = 5,
     });
     try log.interface.flush();
     _ = try log.interface.write("\n");
     try Context.exec("1m entries", 1_000_000, &log.interface, .{
         .lifo_reclaim = false,
         .exclusive = true,
+        .sync_durable = true,
+        .safe_nosync = true,
+        .sync_period_ms = 5,
     });
     try log.interface.flush();
     _ = try log.interface.write("\n");
-    try Context.exec("1m entries with LIFO", 1_000_000, &log.interface, .{
-        .lifo_reclaim = true,
-        .exclusive = true,
-    });
-    _ = try log.interface.write("\n");
-    try log.interface.flush();
+    // try Context.exec("1m entries with LIFO", 1_000_000, &log.interface, .{
+    //     .lifo_reclaim = true,
+    //     .exclusive = true,
+    // });
+    // _ = try log.interface.write("\n");
+    // try log.interface.flush();
 }
 
 var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -63,6 +72,7 @@ const Context = struct {
         defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: {any}", .{e});
 
         const ctx = Context{ .env = env, .name = name, .size = size, .log = log };
+        try ctx.printEnvInfo();
         try ctx.initialize();
         try ctx.printHeader();
 
@@ -106,6 +116,33 @@ const Context = struct {
         try ctx.log.print(
             "| {s:-<30} | {s:->10} | {s:->10} | {s:->10} | {s:->10} | {s:->8} | {s:->10} |\n",
             .{ ":", ":", ":", ":", ":", ":", ":" },
+        );
+    }
+
+    fn printEnvInfo(ctx: Context) !void {
+        const info = try ctx.env.info();
+        const flags = try ctx.env.flagsInfo();
+        const sync_bytes = try ctx.env.syncBytes();
+        const sync_period = try ctx.env.syncPeriod();
+        try ctx.log.print(
+            "env info: map_size={d} db_pagesize={d} sys_pagesize={d} autosync_threshold={d} autosync_period={d} unsync_volume={d} sync_bytes={d} sync_period={d} flags=0x{x} no_meta_sync={} safe_nosync={} unsafe_nosync={} sync_durable={} write_map={} exclusive={}\n\n",
+            .{
+                info.map_size,
+                info.db_pagesize,
+                info.sys_pagesize,
+                info.autosync_threshold,
+                info.autosync_period,
+                info.unsync_volume,
+                sync_bytes,
+                sync_period,
+                flags.raw,
+                flags.no_meta_sync,
+                flags.safe_nosync,
+                flags.unsafe_nosync,
+                flags.sync_durable,
+                flags.write_map,
+                flags.exclusive,
+            },
         );
     }
 
