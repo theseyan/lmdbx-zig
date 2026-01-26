@@ -270,7 +270,10 @@ fn worker(
     var dbi: c.MDBX_dbi = 0;
     const batch_ops = @as(u64, @intCast(bench.batch));
     const cb = struct {
-        fn run(ctx: ?*anyopaque) void {
+        fn run(ctx: ?*anyopaque, success: bool) void {
+            if (!success) {
+                @panic("batched commit sync failed");
+            }
             const cctx = @as(*CallbackCtx, @ptrCast(@alignCast(ctx.?)));
             _ = cctx.completed.fetchAdd(cctx.batch, .monotonic);
         }

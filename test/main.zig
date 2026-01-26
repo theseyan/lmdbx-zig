@@ -175,8 +175,9 @@ test "batched io commit async callback" {
     var ctx = Ctx{};
 
     const cb = struct {
-        fn run(ptr: ?*anyopaque) void {
+        fn run(ptr: ?*anyopaque, success: bool) void {
             const c = @as(*Ctx, @ptrCast(@alignCast(ptr.?)));
+            std.debug.assert(success);
             _ = c.called.fetchAdd(1, .acq_rel);
         }
     }.run;

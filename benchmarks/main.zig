@@ -104,7 +104,7 @@ const Context = struct {
         }
 
         try txn.commit();
-        try ctx.env.sync();
+        _ = try ctx.env.sync(true, false);
     }
 
     fn printHeader(ctx: Context) !void {

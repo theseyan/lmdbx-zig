@@ -31,6 +31,7 @@ stop: std.atomic.Value(bool) align(std.atomic.cache_line) = std.atomic.Value(boo
 sync_counter: std.atomic.Value(u32) align(std.atomic.cache_line) = std.atomic.Value(u32).init(0),
 issued_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Value(u64).init(0),
 durable_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Value(u64).init(0),
+failed_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Value(u64).init(0),
 last_sync_ns: u64,
 thread: ?std.Thread = null,
 
@@ -143,7 +144,7 @@ pub const BatchedTxn = struct {
     }
 };
 
-pub const CommitCallback = *const fn (ctx: ?*anyopaque) void;
+pub const CommitCallback = *const fn (ctx: ?*anyopaque, success: bool) void;
 
 const CommitWaiter = struct {
     seq: u64 = 0,
@@ -156,8 +157,14 @@ fn waitForDurable(self: *BatchedIO, seq: u64) !void {
     if (self.durable_seq.load(.acquire) >= seq) {
         return;
     }
+    if (self.failed_seq.load(.acquire) >= seq) {
+        return error.SyncFailed;
+    }
 
     while (self.durable_seq.load(.acquire) < seq and !self.stop.load(.acquire)) {
+        if (self.failed_seq.load(.acquire) >= seq) {
+            return error.SyncFailed;
+        }
         const cur = self.sync_counter.load(.acquire);
         std.Thread.Futex.wait(&self.sync_counter, cur);
     }
@@ -203,6 +210,12 @@ fn syncLoop(self: *BatchedIO) void {
             },
             else => {
                 std.debug.print("batched io sync error: {any}\n", .{err});
+                updateFailed(&self.failed_seq, target);
+                self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+                _ = self.sync_counter.fetchAdd(1, .release);
+                std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
+                self.drainCallbacks(target, false);
+                continue;
             },
         };
         updateDurable(&self.durable_seq, target);
@@ -210,11 +223,11 @@ fn syncLoop(self: *BatchedIO) void {
 
         _ = self.sync_counter.fetchAdd(1, .release);
         std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
-        self.drainCallbacks();
+        self.drainCallbacks(target, true);
     }
 }
 
-fn drainCallbacks(self: *BatchedIO) void {
+fn drainCallbacks(self: *BatchedIO, threshold: u64, success: bool) void {
     const buf = self.callbacks orelse return;
     const cap = self.callback_capacity;
     while (true) {
@@ -224,16 +237,24 @@ fn drainCallbacks(self: *BatchedIO) void {
         const idx = @as(usize, @intCast(head % cap));
         var slot = &buf[idx];
         if (!slot.ready.load(.acquire)) break;
-        if (slot.seq > self.durable_seq.load(.acquire)) break;
+        if (slot.seq > threshold) break;
         const cb = slot.cb;
         const ctx = slot.ctx;
         slot.ready.store(false, .release);
         self.cb_head.store(head + 1, .release);
-        cb(ctx);
+        cb(ctx, success);
     }
 }
 
 fn updateDurable(target: *std.atomic.Value(u64), value: u64) void {
+    var cur = target.load(.acquire);
+    while (value > cur) {
+        if (target.*.cmpxchgWeak(cur, value, .release, .acquire) == null) break;
+        cur = target.load(.acquire);
+    }
+}
+
+fn updateFailed(target: *std.atomic.Value(u64), value: u64) void {
     var cur = target.load(.acquire);
     while (value > cur) {
         if (target.*.cmpxchgWeak(cur, value, .release, .acquire) == null) break;
