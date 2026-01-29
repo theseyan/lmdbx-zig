@@ -172,12 +172,16 @@ pub fn info(self: Environment) !Info {
 pub fn flagsInfo(self: Environment) !FlagsInfo {
     var flags: c_uint = 0;
     try throw(c.mdbx_env_get_flags(self.ptr, &flags));
+    const no_meta_sync = (flags & c.MDBX_NOMETASYNC) != 0;
+    const safe_nosync = (flags & c.MDBX_SAFE_NOSYNC) != 0;
+    const unsafe_nosync = (flags & c.MDBX_UTTERLY_NOSYNC) == c.MDBX_UTTERLY_NOSYNC;
+    const sync_durable = !no_meta_sync and !safe_nosync and !unsafe_nosync;
     return .{
         .raw = @as(u32, @intCast(flags)),
-        .no_meta_sync = (flags & c.MDBX_NOMETASYNC) != 0,
-        .safe_nosync = (flags & c.MDBX_SAFE_NOSYNC) != 0,
-        .unsafe_nosync = (flags & c.MDBX_UTTERLY_NOSYNC) == c.MDBX_UTTERLY_NOSYNC,
-        .sync_durable = (flags & c.MDBX_SYNC_DURABLE) == c.MDBX_SYNC_DURABLE,
+        .no_meta_sync = no_meta_sync,
+        .safe_nosync = safe_nosync,
+        .unsafe_nosync = unsafe_nosync,
+        .sync_durable = sync_durable,
         .write_map = (flags & c.MDBX_WRITEMAP) != 0,
         .exclusive = (flags & c.MDBX_EXCLUSIVE) != 0,
     };

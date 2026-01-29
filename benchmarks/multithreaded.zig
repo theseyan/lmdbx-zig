@@ -171,7 +171,7 @@ fn runBenchmark(
     var batched_io_ptr: ?*lmdb.BatchedIO = null;
     if (use_batched and bench.kind == .Write) {
         const cb_capacity = threads * 4096;
-        batched_io_storage = lmdb.BatchedIO.init(env, .{
+        batched_io_storage = lmdb.BatchedIO.init(env, allocator, .{
             .sync_interval_ms = if (options.sync_period_ms != 0) options.sync_period_ms else 5,
             .sync_bytes = if (options.sync_bytes != 0) options.sync_bytes else 0,
             .callback_capacity = cb_capacity,

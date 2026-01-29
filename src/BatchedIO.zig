@@ -15,8 +15,13 @@ pub const Options = struct {
     sync_bytes: u64 = 0,
     /// Max pending callbacks. 0 disables callback queue.
     callback_capacity: usize = 0,
-    /// Allocator for callback queue storage.
-    allocator: std.mem.Allocator = std.heap.c_allocator,
+};
+
+pub const StartOptions = struct {
+    /// Optional overrides for start(). Null keeps the init-time value.
+    sync_interval_ms: ?u32 = null,
+    sync_bytes: ?u64 = null,
+    callback_capacity: ?usize = null,
 };
 
 env: Environment,
@@ -35,20 +40,31 @@ failed_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Valu
 last_sync_ns: u64,
 thread: ?std.Thread = null,
 
-pub fn init(env: Environment, options: Options) BatchedIO {
+pub fn init(env: Environment, allocator: std.mem.Allocator, options: Options) BatchedIO {
     return BatchedIO{
         .env = env,
         .sync_interval_ns = @as(u64, options.sync_interval_ms) * 1_000_000,
         .sync_bytes = options.sync_bytes,
-        .allocator = options.allocator,
+        .allocator = allocator,
         .callback_capacity = options.callback_capacity,
         .last_sync_ns = 0,
     };
 }
 
-pub fn start(self: *BatchedIO, options: Options) !void {
-    if (options.sync_bytes != 0) {
-        try throw(c.mdbx_env_set_option(self.env.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_bytes)), options.sync_bytes));
+pub fn start(self: *BatchedIO, options: StartOptions) !void {
+    if (options.sync_interval_ms) |ms| {
+        self.sync_interval_ns = @as(u64, ms) * 1_000_000;
+    }
+    if (options.sync_bytes) |bytes| {
+        self.sync_bytes = bytes;
+        try throw(c.mdbx_env_set_option(self.env.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_bytes)), self.sync_bytes));
+    } else if (self.sync_bytes != 0) {
+        try throw(c.mdbx_env_set_option(self.env.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_bytes)), self.sync_bytes));
+    }
+    if (self.callbacks == null) {
+        if (options.callback_capacity) |cap| {
+            self.callback_capacity = cap;
+        }
     }
     if (self.callback_capacity != 0 and self.callbacks == null) {
         self.callbacks = try self.allocator.alloc(CommitWaiter, self.callback_capacity);

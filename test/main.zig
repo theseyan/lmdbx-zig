@@ -109,7 +109,7 @@ test "batched io basic and concurrent" {
     const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
-    var bio = lmdb.BatchedIO.init(env, .{ .sync_interval_ms = 1 });
+    var bio = lmdb.BatchedIO.init(env, allocator, .{ .sync_interval_ms = 1 });
     try bio.start(.{ .sync_interval_ms = 1 });
     defer bio.deinit();
 
@@ -165,7 +165,7 @@ test "batched io commit async callback" {
     const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
-    var bio = lmdb.BatchedIO.init(env, .{ .sync_interval_ms = 1, .callback_capacity = 16 });
+    var bio = lmdb.BatchedIO.init(env, allocator, .{ .sync_interval_ms = 1, .callback_capacity = 16 });
     try bio.start(.{ .sync_interval_ms = 1, .callback_capacity = 16 });
     defer bio.deinit();
 
