@@ -17,13 +17,6 @@ pub const Options = struct {
     callback_capacity: usize = 0,
 };
 
-pub const StartOptions = struct {
-    /// Optional overrides for start(). Null keeps the init-time value.
-    sync_interval_ms: ?u32 = null,
-    sync_bytes: ?u64 = null,
-    callback_capacity: ?usize = null,
-};
-
 env: Environment,
 sync_interval_ns: u64,
 sync_bytes: u64,
@@ -40,8 +33,8 @@ failed_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Valu
 last_sync_ns: u64,
 thread: ?std.Thread = null,
 
-pub fn init(env: Environment, allocator: std.mem.Allocator, options: Options) BatchedIO {
-    return BatchedIO{
+pub fn init(self: *BatchedIO, env: Environment, allocator: std.mem.Allocator, options: Options) !void {
+    self.* = BatchedIO{
         .env = env,
         .sync_interval_ns = @as(u64, options.sync_interval_ms) * 1_000_000,
         .sync_bytes = options.sync_bytes,
@@ -49,25 +42,16 @@ pub fn init(env: Environment, allocator: std.mem.Allocator, options: Options) Ba
         .callback_capacity = options.callback_capacity,
         .last_sync_ns = 0,
     };
-}
 
-pub fn start(self: *BatchedIO, options: StartOptions) !void {
-    if (options.sync_interval_ms) |ms| {
-        self.sync_interval_ns = @as(u64, ms) * 1_000_000;
-    }
-    if (options.sync_bytes) |bytes| {
-        self.sync_bytes = bytes;
-        try throw(c.mdbx_env_set_option(self.env.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_bytes)), self.sync_bytes));
-    } else if (self.sync_bytes != 0) {
+    const period_ms: u64 = self.sync_interval_ns / 1_000_000;
+    const seconds_16dot16: u64 = (period_ms << 16) / 1000;
+    try throw(c.mdbx_env_set_option(self.env.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_period)), seconds_16dot16));
+    if (self.sync_bytes != 0) {
         try throw(c.mdbx_env_set_option(self.env.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_bytes)), self.sync_bytes));
     }
-    if (self.callbacks == null) {
-        if (options.callback_capacity) |cap| {
-            self.callback_capacity = cap;
-        }
-    }
-    if (self.callback_capacity != 0 and self.callbacks == null) {
+    if (self.callback_capacity != 0) {
         self.callbacks = try self.allocator.alloc(CommitWaiter, self.callback_capacity);
+        errdefer self.allocator.free(self.callbacks.?);
         for (self.callbacks.?) |*slot| slot.* = .{};
     }
     self.thread = try std.Thread.spawn(.{}, syncLoop, .{self});
@@ -231,7 +215,7 @@ fn syncLoop(self: *BatchedIO) void {
             self.drainCallbacks(target, true);
             continue;
         }
-        _ = self.env.sync(true, true) catch |err| switch (err) {
+        const clean = self.env.sync(false, true) catch |err| switch (err) {
             error.MDBX_BUSY => {
                 self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
                 continue;
@@ -246,6 +230,10 @@ fn syncLoop(self: *BatchedIO) void {
                 continue;
             },
         };
+        if (!clean) {
+            self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+            continue;
+        }
         updateSeqMax(&self.durable_seq, target);
         self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
 

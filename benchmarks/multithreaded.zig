@@ -36,7 +36,9 @@ pub fn main() !void {
     var stdout_buffer: [4096]u8 = undefined;
     var log = std.fs.File.stdout().writer(&stdout_buffer);
 
-    var options = lmdb.Environment.Options{};
+    var options = lmdb.Environment.Options{
+        .exclusive = true
+    };
     var threads: usize = 4;
     var duration_s: u64 = 10;
     var keyspace: u64 = 1_000_000;
@@ -171,12 +173,7 @@ fn runBenchmark(
     var batched_io_ptr: ?*lmdb.BatchedIO = null;
     if (use_batched and bench.kind == .Write) {
         const cb_capacity = threads * 4096;
-        batched_io_storage = lmdb.BatchedIO.init(env, allocator, .{
-            .sync_interval_ms = if (options.sync_period_ms != 0) options.sync_period_ms else 5,
-            .sync_bytes = if (options.sync_bytes != 0) options.sync_bytes else 0,
-            .callback_capacity = cb_capacity,
-        });
-        try batched_io_storage.start(.{
+        try batched_io_storage.init(env, allocator, .{
             .sync_interval_ms = if (options.sync_period_ms != 0) options.sync_period_ms else 5,
             .sync_bytes = if (options.sync_bytes != 0) options.sync_bytes else 0,
             .callback_capacity = cb_capacity,
