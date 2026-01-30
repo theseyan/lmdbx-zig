@@ -195,7 +195,7 @@ fn enqueueCallback(self: *BatchedIO, seq: u64, cb: CommitCallback, ctx: ?*anyopa
     const cap = self.callback_capacity;
 
     while (true) {
-        const head = self.cb_head.load(.monotonic);
+        const head = self.cb_head.load(.acquire);
         const tail = self.cb_tail.load(.monotonic);
         if (tail - head >= cap) return error.CallbackQueueFull;
         if (self.cb_tail.cmpxchgWeak(tail, tail + 1, .acq_rel, .acquire) == null) {
@@ -271,7 +271,7 @@ fn drainCallbacks(self: *BatchedIO, threshold: u64, success: bool) void {
         const failed = self.failed_seq.load(.acquire);
         const ok = success and slot.seq > failed;
         slot.ready.store(false, .release);
-        self.cb_head.store(head + 1, .monotonic);
+        self.cb_head.store(head + 1, .release);
         cb(ctx, ok);
     }
 }
