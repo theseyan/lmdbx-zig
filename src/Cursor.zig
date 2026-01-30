@@ -25,6 +25,26 @@ pub fn deinit(self: Cursor) void {
     c.mdbx_cursor_close(self.ptr);
 }
 
+/// Set application context on this cursor.
+pub fn setUserctx(self: Cursor, ctx: ?*anyopaque) !void {
+    try throw(c.mdbx_cursor_set_userctx(self.ptr, ctx));
+}
+
+/// Get application context from this cursor.
+pub fn getUserctx(self: Cursor) ?*anyopaque {
+    return c.mdbx_cursor_get_userctx(self.ptr);
+}
+
+/// Renew the cursor for a new transaction.
+pub fn renew(self: Cursor, txn: Transaction) !void {
+    try throw(c.mdbx_cursor_renew(txn.ptr, self.ptr));
+}
+
+/// Reset the cursor.
+pub fn reset(self: Cursor) !void {
+    try throw(c.mdbx_cursor_reset(self.ptr));
+}
+
 /// Get entry at current cursor position
 pub fn getCurrentEntry(self: Cursor) !Entry {
     var k: c.MDBX_val = undefined;

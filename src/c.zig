@@ -1279,7 +1279,7 @@ pub extern fn mdbx_cursor_unbind(cursor: ?*MDBX_cursor) c_int;
 pub extern fn mdbx_cursor_reset(cursor: ?*MDBX_cursor) c_int;
 pub extern fn mdbx_cursor_open(txn: ?*const MDBX_txn, dbi: MDBX_dbi, cursor: [*c]?*MDBX_cursor) c_int;
 pub extern fn mdbx_cursor_close(cursor: ?*MDBX_cursor) void;
-pub extern fn mdbx_txn_release_all_cursors(txn: ?*const MDBX_txn, unbind: bool) c_int;
+pub extern fn mdbx_txn_release_all_cursors_ex(txn: ?*const MDBX_txn, unbind: bool, count: [*c]usize) c_int;
 pub extern fn mdbx_cursor_renew(txn: ?*const MDBX_txn, cursor: ?*MDBX_cursor) c_int;
 pub extern fn mdbx_cursor_txn(cursor: ?*const MDBX_cursor) ?*MDBX_txn;
 pub extern fn mdbx_cursor_dbi(cursor: ?*const MDBX_cursor) MDBX_dbi;

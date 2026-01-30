@@ -74,14 +74,16 @@ pub fn deinit(self: *BatchedDB) void {
 pub fn transaction(self: *BatchedDB, options: BaseTransaction.Options) !Transaction {
     const txn = try self.env.transaction(options);
     return .{
-        .db = if (options.mode == .ReadWrite) self else null,
+        .db = if (options.mode == .ReadWrite and options.parent == null) self else null,
         .txn = txn,
+        .is_nested = options.parent != null,
     };
 }
 
 pub const Transaction = struct {
     db: ?*BatchedDB,
     txn: BaseTransaction,
+    is_nested: bool,
 
     pub fn abort(self: Transaction) !void {
         try self.txn.abort();
@@ -98,6 +100,7 @@ pub const Transaction = struct {
     }
 
     pub fn commitAsync(self: Transaction, cb: CommitCallback, ctx: ?*anyopaque) !void {
+        if (self.is_nested) return error.NestedTransaction;
         const db = self.db orelse return error.ReadOnlyTransaction;
         const seq = db.issued_seq.fetchAdd(1, .monotonic) + 1;
         try throw(c.mdbx_txn_commit(self.txn.ptr));
@@ -120,6 +123,70 @@ pub const Transaction = struct {
 
     pub fn inner(self: Transaction) BaseTransaction {
         return self.txn;
+    }
+
+    pub fn reset(self: Transaction) !void {
+        try self.txn.reset();
+    }
+
+    pub fn renew(self: Transaction) !void {
+        try self.txn.renew();
+    }
+
+    pub fn park(self: Transaction, autounpark: bool) !void {
+        try self.txn.park(autounpark);
+    }
+
+    pub fn unpark(self: Transaction, restart_if_ousted: bool) !void {
+        try self.txn.unpark(restart_if_ousted);
+    }
+
+    pub fn setUserctx(self: Transaction, ctx: ?*anyopaque) !void {
+        try self.txn.setUserctx(ctx);
+    }
+
+    pub fn getUserctx(self: Transaction) ?*anyopaque {
+        return self.txn.getUserctx();
+    }
+
+    pub fn replace(self: Transaction, key: []const u8, new_value: ?[]const u8, old_value: ?[]const u8, flag: @import("Database.zig").ReplaceFlag) !?[]const u8 {
+        return try self.txn.replace(key, new_value, old_value, flag);
+    }
+
+    pub fn estimateRange(
+        self: Transaction,
+        db: @import("Database.zig"),
+        begin_key: ?[]const u8,
+        begin_data: ?[]const u8,
+        end_key: ?[]const u8,
+        end_data: ?[]const u8,
+    ) !isize {
+        return try self.txn.estimateRange(db, begin_key, begin_data, end_key, end_data);
+    }
+
+    pub fn canaryPut(self: Transaction, canary: ?*const BaseTransaction.Canary) !void {
+        try self.txn.canaryPut(canary);
+    }
+
+    pub fn canaryGet(self: Transaction) !BaseTransaction.Canary {
+        return try self.txn.canaryGet();
+    }
+
+    pub fn releaseAllCursors(self: Transaction, unbind: bool) !void {
+        try self.txn.releaseAllCursors(unbind);
+    }
+
+    pub fn getEqualOrGreat(self: Transaction, key: []const u8) !?@import("Cursor.zig").Entry {
+        return try self.txn.getEqualOrGreat(key);
+    }
+
+    pub fn nested(self: Transaction, options: BaseTransaction.Options) !Transaction {
+        const txn = try self.txn.nested(options);
+        return .{
+            .db = null,
+            .txn = txn,
+            .is_nested = true,
+        };
     }
 
     pub fn get(self: Transaction, key: []const u8) !?[]const u8 {
