@@ -102,13 +102,13 @@ pub const BatchedTxn = struct {
     }
 
     pub fn commit(self: BatchedTxn) !void {
-        const seq = self.io.issued_seq.fetchAdd(1, .acq_rel) + 1;
+        const seq = self.io.issued_seq.fetchAdd(1, .monotonic) + 1;
         try throw(c.mdbx_txn_commit(self.txn.ptr));
         try self.io.waitForDurable(seq);
     }
 
     pub fn commitAsync(self: BatchedTxn, cb: CommitCallback, ctx: ?*anyopaque) !void {
-        const seq = self.io.issued_seq.fetchAdd(1, .acq_rel) + 1;
+        const seq = self.io.issued_seq.fetchAdd(1, .monotonic) + 1;
         try throw(c.mdbx_txn_commit(self.txn.ptr));
         while (true) {
             if (self.io.failed_seq.load(.acquire) >= seq) {
@@ -195,8 +195,8 @@ fn enqueueCallback(self: *BatchedIO, seq: u64, cb: CommitCallback, ctx: ?*anyopa
     const cap = self.callback_capacity;
 
     while (true) {
-        const head = self.cb_head.load(.acquire);
-        const tail = self.cb_tail.load(.acquire);
+        const head = self.cb_head.load(.monotonic);
+        const tail = self.cb_tail.load(.monotonic);
         if (tail - head >= cap) return error.CallbackQueueFull;
         if (self.cb_tail.cmpxchgWeak(tail, tail + 1, .acq_rel, .acquire) == null) {
             const idx = @as(usize, @intCast(tail % cap));
@@ -222,7 +222,7 @@ fn syncLoop(self: *BatchedIO) void {
             std.Thread.sleep(deadline - now);
         }
 
-        const target = self.issued_seq.load(.acquire);
+        const target = self.issued_seq.load(.monotonic);
         _ = self.env.sync(true, true) catch |err| switch (err) {
             error.MDBX_BUSY => {
                 self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
@@ -251,8 +251,8 @@ fn drainCallbacks(self: *BatchedIO, threshold: u64, success: bool) void {
     const buf = self.callbacks orelse return;
     const cap = self.callback_capacity;
     while (true) {
-        const head = self.cb_head.load(.acquire);
-        const tail = self.cb_tail.load(.acquire);
+        const head = self.cb_head.load(.monotonic);
+        const tail = self.cb_tail.load(.monotonic);
         if (head == tail) break;
         const idx = @as(usize, @intCast(head % cap));
         var slot = &buf[idx];
@@ -263,7 +263,7 @@ fn drainCallbacks(self: *BatchedIO, threshold: u64, success: bool) void {
         const failed = self.failed_seq.load(.acquire);
         const ok = success and slot.seq > failed;
         slot.ready.store(false, .release);
-        self.cb_head.store(head + 1, .release);
+        self.cb_head.store(head + 1, .monotonic);
         cb(ctx, ok);
     }
 }
