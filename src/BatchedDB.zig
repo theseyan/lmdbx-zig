@@ -23,13 +23,24 @@ sync_bytes: u64,
 allocator: std.mem.Allocator,
 callback_capacity: usize,
 callbacks: ?[]CommitWaiter = null,
+
+// Callback ring head index.
 cb_head: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Value(u64).init(0),
+// Callback ring tail index.
 cb_tail: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Value(u64).init(0),
+// Signals the sync thread to exit.
 stop: std.atomic.Value(bool) align(std.atomic.cache_line) = std.atomic.Value(bool).init(false),
+// Futex word for waiters on durability progress.
 sync_counter: std.atomic.Value(u32) align(std.atomic.cache_line) = std.atomic.Value(u32).init(0),
+// Futex word for waking the sync thread when sync interval is 0.
+sync_signal: std.atomic.Value(u32) align(std.atomic.cache_line) = std.atomic.Value(u32).init(0),
+// Monotonic commit sequence for issued write txns.
 issued_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Value(u64).init(0),
+// Highest sequence known durable.
 durable_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Value(u64).init(0),
+// Highest sequence that failed durability.
 failed_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Value(u64).init(0),
+
 last_sync_ns: u64,
 thread: ?std.Thread = null,
 
@@ -64,6 +75,8 @@ pub fn deinit(self: *BatchedDB) void {
     self.stop.store(true, .release);
     _ = self.sync_counter.fetchAdd(1, .release);
     std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
+    _ = self.sync_signal.fetchAdd(1, .release);
+    std.Thread.Futex.wake(&self.sync_signal, std.math.maxInt(u32));
     if (self.thread) |t| t.join();
     if (self.callbacks) |buf| {
         self.allocator.free(buf);
@@ -93,6 +106,7 @@ pub const Transaction = struct {
         if (self.db) |db| {
             const seq = db.issued_seq.fetchAdd(1, .monotonic) + 1;
             try throw(c.mdbx_txn_commit(self.txn.ptr));
+            if (db.sync_interval_ns == 0) db.notifySync();
             try db.waitForDurable(seq);
             return;
         }
@@ -104,6 +118,7 @@ pub const Transaction = struct {
         const db = self.db orelse return error.ReadOnlyTransaction;
         const seq = db.issued_seq.fetchAdd(1, .monotonic) + 1;
         try throw(c.mdbx_txn_commit(self.txn.ptr));
+        if (db.sync_interval_ns == 0) db.notifySync();
         while (true) {
             if (db.failed_seq.load(.acquire) >= seq) {
                 cb(ctx, false);
@@ -271,6 +286,11 @@ fn syncLoop(self: *BatchedDB) void {
         const target = self.issued_seq.load(.monotonic);
         const durable = self.durable_seq.load(.acquire);
         if (target == durable) {
+            if (self.sync_interval_ns == 0) {
+                const cur = self.sync_signal.load(.acquire);
+                std.Thread.Futex.wait(&self.sync_signal, cur);
+                continue;
+            }
             self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
             _ = self.sync_counter.fetchAdd(1, .release);
             std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
@@ -299,6 +319,11 @@ fn syncLoop(self: *BatchedDB) void {
         std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
         self.drainCallbacks(target, true);
     }
+}
+
+fn notifySync(self: *BatchedDB) void {
+    _ = self.sync_signal.fetchAdd(1, .release);
+    std.Thread.Futex.wake(&self.sync_signal, 1);
 }
 
 fn drainCallbacks(self: *BatchedDB, threshold: u64, success: bool) void {
