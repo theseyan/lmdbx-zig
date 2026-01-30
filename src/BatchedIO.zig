@@ -223,6 +223,14 @@ fn syncLoop(self: *BatchedIO) void {
         }
 
         const target = self.issued_seq.load(.monotonic);
+        const durable = self.durable_seq.load(.acquire);
+        if (target == durable) {
+            self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+            _ = self.sync_counter.fetchAdd(1, .release);
+            std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
+            self.drainCallbacks(target, true);
+            continue;
+        }
         _ = self.env.sync(true, true) catch |err| switch (err) {
             error.MDBX_BUSY => {
                 self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
@@ -230,7 +238,7 @@ fn syncLoop(self: *BatchedIO) void {
             },
             else => {
                 std.debug.print("batched io sync error: {any}\n", .{err});
-                updateFailed(&self.failed_seq, target);
+                updateSeqMax(&self.failed_seq, target);
                 self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
                 _ = self.sync_counter.fetchAdd(1, .release);
                 std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
@@ -238,7 +246,7 @@ fn syncLoop(self: *BatchedIO) void {
                 continue;
             },
         };
-        updateDurable(&self.durable_seq, target);
+        updateSeqMax(&self.durable_seq, target);
         self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
 
         _ = self.sync_counter.fetchAdd(1, .release);
@@ -268,15 +276,7 @@ fn drainCallbacks(self: *BatchedIO, threshold: u64, success: bool) void {
     }
 }
 
-fn updateDurable(target: *std.atomic.Value(u64), value: u64) void {
-    var cur = target.load(.acquire);
-    while (value > cur) {
-        if (target.*.cmpxchgWeak(cur, value, .release, .acquire) == null) break;
-        cur = target.load(.acquire);
-    }
-}
-
-fn updateFailed(target: *std.atomic.Value(u64), value: u64) void {
+fn updateSeqMax(target: *std.atomic.Value(u64), value: u64) void {
     var cur = target.load(.acquire);
     while (value > cur) {
         if (target.*.cmpxchgWeak(cur, value, .release, .acquire) == null) break;
