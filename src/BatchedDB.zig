@@ -43,6 +43,9 @@ pub fn init(self: *BatchedDB, env: Environment, allocator: std.mem.Allocator, op
         .last_sync_ns = 0,
     };
 
+    // Enable SAFE_NOSYNC so that we can control syncing manually
+    try throw(c.mdbx_env_set_flags(self.env.ptr, c.MDBX_SAFE_NOSYNC, true));
+
     const period_ms: u64 = self.sync_interval_ns / 1_000_000;
     const seconds_16dot16: u64 = (period_ms << 16) / 1000;
     try throw(c.mdbx_env_set_option(self.env.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_period)), seconds_16dot16));
@@ -125,18 +128,6 @@ pub const Transaction = struct {
 
     pub fn set(self: Transaction, key: []const u8, value: []const u8, flag: @import("Database.zig").SetFlag) !void {
         try self.txn.set(key, value, flag);
-    }
-
-    pub fn getSerialized(self: Transaction, key: []const u8, comptime ValueType: type) !?ValueType {
-        return try self.txn.getSerialized(key, ValueType);
-    }
-
-    pub fn getSerializedAlloc(self: Transaction, key: []const u8, comptime ValueType: type, allocator: std.mem.Allocator) !?ValueType {
-        return try self.txn.getSerializedAlloc(key, ValueType, allocator);
-    }
-
-    pub fn setSerialized(self: Transaction, key: []const u8, comptime ValueType: type, value: ValueType, buffer: anytype) !void {
-        try self.txn.setSerialized(key, ValueType, value, buffer);
     }
 
     pub fn delete(self: Transaction, key: []const u8) !void {

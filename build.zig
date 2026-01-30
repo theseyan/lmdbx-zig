@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const mdbx = b.addModule("lmdbx", .{ .root_source_file = b.path("src/lib.zig") });
+    const zbench_dep = b.dependency("zbench", .{});
+    const zbench_mod = b.addModule("zbench", .{ .root_source_file = zbench_dep.path("zbench.zig") });
 
     // Add CPU features polyfill until https://github.com/ziglang/zig/pull/20081 gets merged
     const cpuf_dep = b.dependency("cpu_features", .{});
@@ -103,14 +105,14 @@ pub fn build(b: *std.Build) void {
 
     // Benchmarks
     const bench_mod = b.createModule(.{
-        .root_source_file = b.path("benchmarks/main.zig"),
+        .root_source_file = b.path("benchmarks/bench.zig"),
         .target = target,
         .optimize = if (IS_DEV) .Debug else .ReleaseFast,
         .link_libc = true,
-        .imports = &.{.{ .name = "lmdbx", .module = mdbx }},
+        .imports = &.{ .{ .name = "lmdbx", .module = mdbx }, .{ .name = "zbench", .module = zbench_mod } },
     });
     const bench = b.addExecutable(.{
-        .name = "lmdbx-benchmark",
+        .name = "lmdbx-bench",
         .root_module = bench_mod,
     });
 
@@ -130,18 +132,16 @@ pub fn build(b: *std.Build) void {
     const bench_mt_mod = b.createModule(.{
         .root_source_file = b.path("benchmarks/multithreaded.zig"),
         .target = target,
-        .optimize = if (IS_DEV) .Debug else .ReleaseFast,
+        .optimize = .ReleaseFast,
         .link_libc = true,
         .imports = &.{.{ .name = "lmdbx", .module = mdbx }},
     });
     const bench_mt = b.addExecutable(.{
-        .name = "lmdbx-benchmark-mt",
+        .name = "lmdbx-bench-mt",
         .root_module = bench_mt_mod,
     });
 
     b.installArtifact(bench_mt);
-
-    // Linker flags for libMDBX
     bench_mt.link_gc_sections = true;
     bench_mt.link_z_relro = true;
 

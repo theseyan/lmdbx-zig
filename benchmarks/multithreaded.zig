@@ -1,7 +1,5 @@
 const std = @import("std");
 const lmdb = @import("lmdbx");
-const c = lmdb.c;
-
 const allocator = std.heap.c_allocator;
 
 const ns_per_s: u64 = 1_000_000_000;
@@ -17,11 +15,56 @@ const BenchSpec = struct {
 const BenchResult = struct {
     ops: u64,
     completed_ops: u64,
+    avg_commit_ns: u64,
+    max_commit_ns: u64,
+};
+
+const LatencyStats = struct {
+    count: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    sum_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    max_ns: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+};
+
+const LatencyQueue = struct {
+    buf: []u64,
+    head: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    tail: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    fn init(alloc: std.mem.Allocator, cap: usize) !LatencyQueue {
+        return .{ .buf = try alloc.alloc(u64, cap) };
+    }
+
+    fn deinit(self: *LatencyQueue, alloc: std.mem.Allocator) void {
+        alloc.free(self.buf);
+    }
+
+    fn tryPush(self: *LatencyQueue, value: u64) bool {
+        const cap = self.buf.len;
+        const head = self.head.load(.acquire);
+        const tail = self.tail.load(.acquire);
+        if (tail - head >= cap) return false;
+        const idx = @as(usize, @intCast(tail % cap));
+        self.buf[idx] = value;
+        self.tail.store(tail + 1, .release);
+        return true;
+    }
+
+    fn tryPop(self: *LatencyQueue) ?u64 {
+        const head = self.head.load(.acquire);
+        const tail = self.tail.load(.acquire);
+        if (head == tail) return null;
+        const idx = @as(usize, @intCast(head % self.buf.len));
+        const value = self.buf[idx];
+        self.head.store(head + 1, .release);
+        return value;
+    }
 };
 
 const CallbackCtx = struct {
     completed: *std.atomic.Value(u64),
     batch: u64,
+    latency: *LatencyStats,
+    queue: *LatencyQueue,
 };
 
 const Precomputed = struct {
@@ -72,12 +115,17 @@ pub fn main() !void {
             value_size = try parseUsize(arg["--value-size=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--path=")) {
             db_path = arg["--path=".len..];
-        } else if (std.mem.eql(u8, arg, "--batched-io")) {
+        } else if (std.mem.eql(u8, arg, "--batched-db")) {
             use_batched = true;
         } else {
             try usage(&log.interface);
             return;
         }
+    }
+
+    if (use_batched) {
+        // BatchedDB requires SAFE_NOSYNC; set it so env info reflects actual runtime behavior.
+        options.safe_nosync = true;
     }
 
     if (threads == 0 or keyspace == 0 or duration_s == 0 or key_size == 0 or value_size == 0) {
@@ -138,12 +186,12 @@ pub fn main() !void {
     };
 
     try log.interface.print(
-        "| {s: <30} | {s: >8} | {s: >10} | {s: >10} | {s: >12} |\n",
-        .{ "", "threads", "ops", "ops / s", "completed ops" },
+        "| {s: <30} | {s: >8} | {s: >10} | {s: >10} | {s: >12} | {s: >12} |\n",
+        .{ "", "threads", "ops", "ops / s", "avg commit", "max commit" },
     );
     try log.interface.print(
-        "| {s:-<30} | {s:->8} | {s:->10} | {s:->10} | {s:->12} |\n",
-        .{ ":", ":", ":", ":", ":" },
+        "| {s:-<30} | {s:->8} | {s:->10} | {s:->10} | {s:->12} | {s:->12} |\n",
+        .{ ":", ":", ":", ":", ":", ":" },
     );
 
     for (benches) |bench| {
@@ -151,8 +199,15 @@ pub fn main() !void {
         const effective_ops = if (use_batched and bench.kind == .Write) result.completed_ops else result.ops;
         const ops_per_sec = @as(f64, @floatFromInt(effective_ops)) / @as(f64, @floatFromInt(duration_s));
         try log.interface.print(
-            "| {s: <30} | {d: >8} | {d: >10} | {d: >10.0} | {d: >12} |\n",
-            .{ bench.name, threads, effective_ops, ops_per_sec, result.completed_ops },
+            "| {s: <30} | {d: >8} | {d: >10} | {d: >10.0} | {d: >10}us | {d: >10}us |\n",
+            .{
+                bench.name,
+                threads,
+                effective_ops,
+                ops_per_sec,
+                result.avg_commit_ns / 1_000,
+                result.max_commit_ns / 1_000,
+            },
         );
         try log.interface.flush();
     }
@@ -171,6 +226,7 @@ fn runBenchmark(
 ) !BenchResult {
     var batched_io_storage: lmdb.BatchedDB = undefined;
     var batched_io_ptr: ?*lmdb.BatchedDB = null;
+    var latency = LatencyStats{};
     if (use_batched and bench.kind == .Write) {
         const cb_capacity = threads * 4096;
         try batched_io_storage.init(env, allocator, .{
@@ -185,7 +241,25 @@ fn runBenchmark(
     var total_ops = std.atomic.Value(u64).init(0);
     var total_submitted = std.atomic.Value(u64).init(0);
     var total_completed = std.atomic.Value(u64).init(0);
-    var cb_ctx = CallbackCtx{ .completed = &total_completed, .batch = @as(u64, @intCast(bench.batch)) };
+
+    const queue_cap: usize = 4096;
+    const queues = try allocator.alloc(LatencyQueue, threads);
+    defer {
+        for (queues) |*q| q.deinit(allocator);
+        allocator.free(queues);
+    }
+    for (queues) |*q| q.* = try LatencyQueue.init(allocator, queue_cap);
+
+    const cb_ctx = try allocator.alloc(CallbackCtx, threads);
+    defer allocator.free(cb_ctx);
+    for (cb_ctx, 0..) |*ctx, idx| {
+        ctx.* = .{
+            .completed = &total_completed,
+            .batch = @as(u64, @intCast(bench.batch)),
+            .latency = &latency,
+            .queue = &queues[idx],
+        };
+    }
 
     const precompute_count = bench.batch * 1024;
     const precomputed = try allocator.alloc(Precomputed, threads);
@@ -227,7 +301,8 @@ fn runBenchmark(
             precomputed[idx],
             &total_ops,
             &total_submitted,
-            &cb_ctx,
+            &cb_ctx[idx],
+            &latency,
         });
     }
 
@@ -245,9 +320,13 @@ fn runBenchmark(
             completed = total_completed.load(.monotonic);
         }
     }
+    const count = latency.count.load(.monotonic);
+    const avg_commit_ns: u64 = if (count == 0) 0 else latency.sum_ns.load(.monotonic) / count;
     return .{
         .ops = ops,
         .completed_ops = completed,
+        .avg_commit_ns = avg_commit_ns,
+        .max_commit_ns = latency.max_ns.load(.monotonic),
     };
 }
 
@@ -260,11 +339,11 @@ fn worker(
     total_ops: *std.atomic.Value(u64),
     total_submitted: *std.atomic.Value(u64),
     cb_ctx: *CallbackCtx,
+    latency: *LatencyStats,
 ) void {
     var local_ops: u64 = 0;
     var offset: usize = 0;
     const cap = precomputed.count;
-    var dbi: c.MDBX_dbi = 0;
     const batch_ops = @as(u64, @intCast(bench.batch));
     const cb = struct {
         fn run(ctx: ?*anyopaque, success: bool) void {
@@ -273,18 +352,12 @@ fn worker(
             }
             const cctx = @as(*CallbackCtx, @ptrCast(@alignCast(ctx.?)));
             _ = cctx.completed.fetchAdd(cctx.batch, .monotonic);
+            const start_ns = cctx.queue.tryPop() orelse return;
+            const now_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+            const delta = now_ns - start_ns;
+            recordLatency(cctx.latency, delta);
         }
     }.run;
-
-    // Open default DBI once per thread.
-    {
-        const txn = env.transaction(.{ .mode = .ReadOnly }) catch @panic("dbi txn begin failed");
-        errdefer txn.abort() catch {};
-        if (c.mdbx_dbi_open(txn.ptr, null, 0, &dbi) != 0) {
-            @panic("dbi open failed");
-        }
-        txn.commit() catch @panic("dbi txn commit failed");
-    }
 
     while (std.time.nanoTimestamp() < end_time) {
         var txn_opt: ?lmdb.Transaction = null;
@@ -315,11 +388,9 @@ fn worker(
             const key = precomputed.keys[idx * precomputed.key_size ..][0..precomputed.key_size];
             switch (bench.kind) {
                 .Read => {
-                    var k: c.MDBX_val = .{ .iov_len = key.len, .iov_base = @as([*]u8, @ptrFromInt(@intFromPtr(key.ptr))) };
-                    var v: c.MDBX_val = .{ .iov_len = 0, .iov_base = null };
-                    const rc = c.mdbx_get((txn_opt.?).ptr, dbi, &k, &v);
-                    if (rc != 0 and rc != c.MDBX_NOTFOUND) {
-                        std.debug.panic("mdbx_get failed: {d}", .{rc});
+                    const value = db.get(key) catch @panic("db get failed");
+                    if (value != null and value.?.len != precomputed.value_size) {
+                        @panic("unexpected value size");
                     }
                 },
                 .Write => {
@@ -330,16 +401,32 @@ fn worker(
         }
 
         if (batched_opt) |bt| {
+            const start_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+            _ = cb_ctx.queue.tryPush(start_ns);
             bt.commitAsync(cb, cb_ctx) catch |e| std.debug.panic("batched commit async failed: {any}", .{e});
             _ = total_submitted.fetchAdd(batch_ops, .monotonic);
         } else {
+            const start_ns = std.time.nanoTimestamp();
             txn_opt.?.commit() catch @panic("txn commit failed");
+            const end_ns = std.time.nanoTimestamp();
+            const delta = @as(u64, @intCast(end_ns - start_ns));
+            recordLatency(latency, delta);
         }
         local_ops += @as(u64, @intCast(bench.batch));
         offset = (offset + bench.batch) % cap;
     }
 
     _ = total_ops.fetchAdd(local_ops, .monotonic);
+}
+
+fn recordLatency(stats: *LatencyStats, delta_ns: u64) void {
+    _ = stats.count.fetchAdd(1, .monotonic);
+    _ = stats.sum_ns.fetchAdd(delta_ns, .monotonic);
+    var cur_max = stats.max_ns.load(.monotonic);
+    while (delta_ns > cur_max) {
+        if (stats.max_ns.cmpxchgWeak(cur_max, delta_ns, .monotonic, .monotonic) == null) break;
+        cur_max = stats.max_ns.load(.monotonic);
+    }
 }
 
 fn open(dir: std.fs.Dir, options: lmdb.Environment.Options) !lmdb.Environment {
@@ -397,7 +484,7 @@ fn usage(w: *std.Io.Writer) !void {
         \\  --key-size=N         key size in bytes (default 16)
         \\  --value-size=N       value size in bytes (default 512)
         \\  --path=PATH          open existing database at PATH (no init)
-        \\  --batched-io         use BatchedDB for write transactions
+        \\  --batched-db         use BatchedDB for write transactions
         \\  --safe-nosync        enable MDBX_SAFE_NOSYNC
         \\  --no-meta-sync       enable MDBX_NOMETASYNC
         \\  --unsafe-nosync      enable MDBX_UTTERLY_NOSYNC
@@ -408,7 +495,7 @@ fn usage(w: *std.Io.Writer) !void {
 }
 
 fn fillFromId(buf: []u8, id: u64) void {
-    var x = id + 0x9e3779b97f4a7c15;
+    var x = id +% 0x9e3779b97f4a7c15;
     var i: usize = 0;
     while (i < buf.len) : (i += 8) {
         x = splitmix64(x);
@@ -420,7 +507,7 @@ fn fillFromId(buf: []u8, id: u64) void {
 }
 
 fn splitmix64(x: u64) u64 {
-    var z = x + 0x9e3779b97f4a7c15;
+    var z = x +% 0x9e3779b97f4a7c15;
     z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
     z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
     return z ^ (z >> 31);

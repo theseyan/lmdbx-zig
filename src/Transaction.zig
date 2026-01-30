@@ -68,25 +68,6 @@ pub fn set(self: Transaction, key: []const u8, value: []const u8, flag: Database
     try db.set(key, value, flag);
 }
 
-/// Get a serialized record.
-pub fn getSerialized(self: Transaction, key: []const u8, comptime ValueType: type) !?ValueType {
-    const db = try Database.open(self, null, .{});
-    return try db.getSerialized(key, ValueType);
-}
-
-/// Get a serialized record.
-/// Allocators are required if points er involved.
-pub fn getSerializedAlloc(self: Transaction, key: []const u8, comptime ValueType: type, allocator: std.mem.Allocator) !?ValueType {
-    const db = try Database.open(self, null, .{});
-    return try db.getSerializedAlloc(key, ValueType, allocator);
-}
-
-/// Set a record by serializing Zig structs and values
-pub fn setSerialized(self: Transaction, key: []const u8, comptime ValueType: type, value: ValueType, buffer: anytype) !void {
-    const db = try Database.open(self, null, .{});
-    try db.setSerialized(key, ValueType, value, buffer);
-}
-
 /// Delete a record by key
 pub fn delete(self: Transaction, key: []const u8) !void {
     const db = try Database.open(self, null, .{});
