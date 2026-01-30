@@ -209,6 +209,49 @@ test "batched io commit async callback" {
     try expectEqualSlices(u8, "vb", vb.?);
 }
 
+test "batched io async callback respects failed seq" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    var bio = lmdb.BatchedIO.init(env, allocator, .{ .sync_interval_ms = 200, .callback_capacity = 8 });
+    try bio.start(.{ .sync_interval_ms = 200, .callback_capacity = 8 });
+    defer bio.deinit();
+
+    const Ctx = struct {
+        called: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+        success: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    };
+    var ctx = Ctx{};
+
+    const cb = struct {
+        fn run(ptr: ?*anyopaque, success: bool) void {
+            const c = @as(*Ctx, @ptrCast(@alignCast(ptr.?)));
+            c.success.store(success, .release);
+            _ = c.called.fetchAdd(1, .acq_rel);
+        }
+    }.run;
+
+    {
+        var txn = try bio.beginWrite();
+        try txn.set("kf", "vf", .Upsert);
+        try txn.commitAsync(cb, &ctx);
+    }
+
+    const seq = bio.issued_seq.load(.acquire);
+    bio.failed_seq.store(seq, .release);
+
+    var spins: u32 = 0;
+    while (ctx.called.load(.acquire) < 1 and spins < 2000) : (spins += 1) {
+        std.Thread.sleep(1_000_000);
+    }
+
+    try expectEqual(@as(u32, 1), ctx.called.load(.acquire));
+    try expectEqual(false, ctx.success.load(.acquire));
+}
+
 test "multiple named databases" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

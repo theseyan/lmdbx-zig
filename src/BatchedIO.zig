@@ -111,6 +111,10 @@ pub const BatchedTxn = struct {
         const seq = self.io.issued_seq.fetchAdd(1, .acq_rel) + 1;
         try throw(c.mdbx_txn_commit(self.txn.ptr));
         while (true) {
+            if (self.io.failed_seq.load(.acquire) >= seq) {
+                cb(ctx, false);
+                return;
+            }
             self.io.enqueueCallback(seq, cb, ctx) catch |e| switch (e) {
                 error.CallbackQueueFull => {
                     const cur = self.io.sync_counter.load(.acquire);
@@ -219,7 +223,7 @@ fn syncLoop(self: *BatchedIO) void {
         }
 
         const target = self.issued_seq.load(.acquire);
-        _ = self.env.sync(false, true) catch |err| switch (err) {
+        _ = self.env.sync(true, true) catch |err| switch (err) {
             error.MDBX_BUSY => {
                 self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
                 continue;
@@ -256,9 +260,11 @@ fn drainCallbacks(self: *BatchedIO, threshold: u64, success: bool) void {
         if (slot.seq > threshold) break;
         const cb = slot.cb;
         const ctx = slot.ctx;
+        const failed = self.failed_seq.load(.acquire);
+        const ok = success and slot.seq > failed;
         slot.ready.store(false, .release);
         self.cb_head.store(head + 1, .release);
-        cb(ctx, success);
+        cb(ctx, ok);
     }
 }
 
