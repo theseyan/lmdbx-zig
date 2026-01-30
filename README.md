@@ -17,9 +17,11 @@ out-of-the-box, not silently and catastrophically break down.
 - [Usage](#usage)
 - [API](#api)
   - [`Environment`](#environment)
+  - [`BatchedDB`](#batcheddb)
   - [`Transaction`](#transaction)
   - [`Database`](#database)
   - [`Cursor`](#cursor)
+  - [Low-level bindings](#low-level-bindings)
 - [Benchmarks](#benchmarks)
 
 ## Installation
@@ -63,7 +65,7 @@ pub fn main() !void {
     const env = try lmdbx.Environment.init("path/to/db", .{});
     defer env.deinit();
 
-    const txn = try lmdbx.Transaction.init(env, .{ .mode = .ReadWrite });
+    const txn = try env.transaction(.{ .mode = .ReadWrite });
     errdefer txn.abort();
 
     try txn.set("aaa", "foo", .Create);
@@ -82,7 +84,7 @@ pub fn main() !void {
     const env = try lmdbx.Environment.init("path/to/db", .{ .max_dbs = 2 });
     defer env.deinit();
 
-    const txn = try lmdbx.Transaction.init(env, .{ .mode = .ReadWrite });
+    const txn = try env.transaction(.{ .mode = .ReadWrite });
     errdefer txn.abort();
 
     const widgets = try txn.database("widgets", .{ .create = true });
@@ -91,6 +93,52 @@ pub fn main() !void {
     const gadgets = try txn.database("gadgets", .{ .create = true });
     try gadgets.set("aaa", "bar", .Create);
 
+    try txn.commit();
+}
+```
+
+Nested transactions are supported through `Transaction.nested(...)` (or `Options.parent`).
+
+```zig
+const lmdbx = @import("lmdbx");
+
+pub fn main() !void {
+    const env = try lmdbx.Environment.init("path/to/db", .{});
+    defer env.deinit();
+
+    const parent = try env.transaction(.{ .mode = .ReadWrite });
+    errdefer parent.abort();
+
+    const child = try parent.nested(.{ .mode = .ReadWrite });
+    errdefer child.abort();
+    try child.set("k", "v", .Upsert);
+    try child.commit();
+
+    try parent.commit();
+}
+```
+
+`BatchedDB` is a fully ACID transaction layer on top of libMDBX's `SAFE_NOSYNC` flag combined with configurable disk syncs by interval/max-bytes threshold, enabling callback-based async transaction commits while massively increasing write throughput by amortizing disk I/O costs. On the flip side, write transactions show a considerable increase in latency which may or may not be acceptable based on your requirements.
+
+```zig
+const lmdbx = @import("lmdbx");
+const std = @import("std");
+
+pub fn main() !void {
+    const env = try lmdbx.Environment.init("path/to/db", .{});
+    defer env.deinit();
+
+    var batched: lmdbx.BatchedDB = undefined;
+    try batched.init(env, std.heap.page_allocator, .{
+        .sync_interval_ms = 2,
+        .sync_bytes = 0,
+        .callback_capacity = 64,
+    });
+    defer batched.deinit();
+
+    const txn = try batched.transaction(.{ .mode = .ReadWrite });
+    errdefer txn.abort();
+    try txn.set("aaa", "foo", .Upsert);
     try txn.commit();
 }
 ```
@@ -114,7 +162,23 @@ pub const Environment = struct {
         lifo_reclaim: bool = false,
         no_meta_sync: bool = false,
         safe_nosync: bool = false,
+        unsafe_nosync: bool = false,
+        sync_durable: bool = true,
+        /// Autosync period in milliseconds. 0 disables periodic autosync.
+        sync_period_ms: u32 = 0,
+        /// Autosync threshold in bytes. 0 disables threshold-based autosync.
+        sync_bytes: usize = 0,
         mode: u16 = 0o664
+    };
+
+    pub const FlagsInfo = struct {
+        raw: u32,
+        no_meta_sync: bool,
+        safe_nosync: bool,
+        unsafe_nosync: bool,
+        sync_durable: bool,
+        write_map: bool,
+        exclusive: bool,
     };
 
     pub const Info = struct {
@@ -143,11 +207,45 @@ pub const Environment = struct {
 
     pub fn transaction(self: Environment, options: Transaction.Options) !Transaction
 
-    pub fn sync(self: Environment) !void
+    pub fn sync(self: Environment, force: bool, nonblock: bool) !bool
     pub fn stat(self: Environment) !Stat
     pub fn info(self: Environment) !Info
+    pub fn flagsInfo(self: Environment) !FlagsInfo
+    pub fn syncBytes(self: Environment) !usize
+    pub fn syncPeriod(self: Environment) !u32
 
     pub fn setGeometry(self: Environment, options: DatabaseGeometry) !void
+};
+```
+
+### `BatchedDB`
+
+```zig
+pub const BatchedDB = struct {
+    pub const Options = struct {
+        /// Sync interval in milliseconds.
+        sync_interval_ms: u32 = 2,
+        /// If non-zero, trigger early sync when unsynced volume reaches this threshold.
+        sync_bytes: u64 = 0,
+        /// Max pending callbacks. 0 disables callback queue.
+        callback_capacity: usize = 0,
+    };
+
+    pub const CommitCallback = *const fn (ctx: ?*anyopaque, success: bool) void;
+
+    pub fn init(self: *BatchedDB, env: Environment, allocator: std.mem.Allocator, options: Options) !void
+    pub fn deinit(self: *BatchedDB) void
+
+    pub fn transaction(self: *BatchedDB, options: Transaction.Options) !Transaction
+
+    pub const Transaction = struct {
+        pub fn abort(self: Transaction) !void
+        pub fn commit(self: Transaction) !void
+        pub fn commitAsync(self: Transaction, cb: CommitCallback, ctx: ?*anyopaque) !void
+        /// Returns the underlying lmdbx.Transaction.
+        pub fn inner(self: Transaction) Transaction
+        /// All other Transaction APIs are forwarded (get/set/delete, cursor, database, nested, etc).
+    };
 };
 ```
 
@@ -158,20 +256,33 @@ pub const Transaction = struct {
     pub const Mode = enum { ReadOnly, ReadWrite };
 
     pub const Options = struct {
-        mode: Mode,
+        mode: Mode = .ReadWrite,
         parent: ?Transaction = null,
         txn_try: bool = false
     };
 
     pub fn init(env: Environment, options: Options) !Transaction
+    pub fn nested(self: Transaction, options: Options) !Transaction
     pub fn abort(self: Transaction) !void
     pub fn commit(self: Transaction) !void
+    pub fn reset(self: Transaction) !void
+    pub fn renew(self: Transaction) !void
+    pub fn park(self: Transaction, autounpark: bool) !void
+    pub fn unpark(self: Transaction, restart_if_ousted: bool) !void
+    pub fn setUserctx(self: Transaction, ctx: ?*anyopaque) !void
+    pub fn getUserctx(self: Transaction) ?*anyopaque
+    pub fn replace(self: Transaction, key: []const u8, new_value: ?[]const u8, old_value: ?[]const u8, flag: Database.ReplaceFlag) !?[]const u8
+    pub fn estimateRange(self: Transaction, db: Database, begin_key: ?[]const u8, begin_data: ?[]const u8, end_key: ?[]const u8, end_data: ?[]const u8) !isize
+    pub fn canaryPut(self: Transaction, canary: ?*const Canary) !void
+    pub fn canaryGet(self: Transaction) !Canary
+    pub fn releaseAllCursors(self: Transaction, unbind: bool) !void
+    pub fn getEqualOrGreat(self: Transaction, key: []const u8) !?Cursor.Entry
 
     pub fn get(self: Transaction, key: []const u8) !?[]const u8
     pub fn set(self: Transaction, key: []const u8, value: []const u8, flag: Database.SetFlag) !void
     pub fn delete(self: Transaction, key: []const u8) !void
 
-    pub fn cursor(self: Database) !Cursor
+    pub fn cursor(self: Transaction) !Cursor
     pub fn database(self: Transaction, name: ?[*:0]const u8, options: Database.Options) !Database
 };
 ```
@@ -180,6 +291,8 @@ pub const Transaction = struct {
 
 ```zig
 pub const Database = struct {
+    pub const DBI = c.MDBX_dbi;
+
     pub const Options = struct {
         reverse_key: bool = false,
         integer_key: bool = false,
@@ -199,15 +312,29 @@ pub const Database = struct {
         Create, Update, Upsert, Append, AppendDup
     };
 
+    pub const ReplaceFlag = enum {
+        Upsert,
+        Create,
+        Update,
+        Append,
+        AppendDup,
+        CurrentNoOverwrite,
+    };
+
     pub fn open(txn: Transaction, name: ?[*:0]const u8, options: Options) !Database
 
     pub fn get(self: Database, key: []const u8) !?[]const u8
     pub fn set(self: Database, key: []const u8, value: []const u8, flag: SetFlag) !void
     pub fn delete(self: Database, key: []const u8) !void
+    pub fn replace(self: Database, key: []const u8, new_value: ?[]const u8, old_value: ?[]const u8, flag: ReplaceFlag) !?[]const u8
+    pub fn drop(self: Database, delete_dbi: bool) !void
 
     pub fn cursor(self: Database) !Cursor
+    pub fn getEqualOrGreat(self: Database, key: []const u8) !?Cursor.Entry
 
     pub fn stat(self: Database) !Stat
+    pub fn rename(self: Database, name: [*:0]const u8) !void
+    pub fn sequence(self: Database, increment: u64) !u64
 };
 ```
 
@@ -219,6 +346,11 @@ pub const Cursor = struct {
 
     pub fn init(db: Database) !Cursor
     pub fn deinit(self: Cursor) void
+
+    pub fn setUserctx(self: Cursor, ctx: ?*anyopaque) !void
+    pub fn getUserctx(self: Cursor) ?*anyopaque
+    pub fn renew(self: Cursor, txn: Transaction) !void
+    pub fn reset(self: Cursor) !void
 
     pub fn getCurrentEntry(self: Cursor) !Entry
     pub fn getCurrentKey(self: Cursor) ![]const u8
@@ -239,6 +371,15 @@ pub const Cursor = struct {
 ```
 
 > ⚠️ Always close cursors **before** committing or aborting the transaction.
+
+### Low-level bindings
+
+`lmdbx.c` exposes raw libMDBX bindings (constants, types, and functions) as imported C symbols:
+
+```zig
+const lmdbx = @import("lmdbx");
+const c = lmdbx.c;
+```
 
 ## Benchmarks
 

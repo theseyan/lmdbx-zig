@@ -22,7 +22,7 @@ test "basic operations" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{});
+    const env = try open(tmp.dir, .{ .max_dbs = 32 });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -57,49 +57,467 @@ test "basic operations" {
     }
 }
 
-test "serialized operations" {
+test "replace operations" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{});
+    const env = try open(tmp.dir, .{ .max_dbs = 8 });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
-    // A shared 4KiB buffer for serializing
-    var buffer: [4096]u8 = undefined;
-
-    const Person = struct { name: []const u8, age: u8, friends: []const []const u8 };
-
-    const me = Person{ .name = "Sayan J. Das", .age = 69, .friends = &[_][]const u8{ "Friend A", "Friend B", "Friend C" } };
-
     {
-        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        var txn = try env.transaction(.{ .mode = .ReadWrite });
         errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
-
-        try txn.setSerialized("x", Person, me, @constCast(&buffer));
-        try txn.setSerialized("y", Person, me, @constCast(&buffer));
-        try txn.setSerialized("z", Person, me, @constCast(&buffer));
-
+        try txn.set("k", "v1", .Upsert);
         try txn.commit();
     }
 
     {
-        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        var txn = try env.transaction(.{ .mode = .ReadWrite });
         errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
 
-        try txn.delete("y");
-        try txn.setSerialized("x", Person, me, @constCast(&buffer));
+        const db = try txn.database(null, .{});
+        const old = try db.replace("k", "v2", null, .Upsert);
+        try expect(old != null);
+        try expectEqualSlices(u8, "v1", old.?);
 
+        const deleted = try db.replace("k", null, null, .Upsert);
+        try expect(deleted == null);
+
+        const v = try db.get("k");
+        try expect(v == null);
+
+        try txn.commit();
+    }
+}
+
+test "database rename" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .max_dbs = 32 });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    {
+        var txn = try env.transaction(.{ .mode = .ReadWrite });
+        errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const old_name: [*:0]const u8 = "old\x00";
+        const new_name: [*:0]const u8 = "new\x00";
+        const db = txn.database(old_name, .{ .create = true }) catch |e| {
+            std.debug.print("open dbi error: {any}\n", .{e});
+            return e;
+        };
+        try db.rename(new_name);
         try txn.commit();
     }
 
     {
         const txn = try env.transaction(.{ .mode = .ReadOnly });
         defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
-
-        const deserStruct: ?Person = try txn.getSerializedAlloc("x", Person, allocator);
-
-        try std.testing.expectEqualStrings("Sayan J. Das", deserStruct.?.name);
+        const new_name: [*:0]const u8 = "new\x00";
+        const db = try txn.database(new_name, .{});
+        _ = db;
     }
+}
+
+test "estimate range, canary, and sequence" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .max_dbs = 8 });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    {
+        var txn = try env.transaction(.{ .mode = .ReadWrite });
+        errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const db = try txn.database(null, .{});
+        try db.set("a", "1", .Upsert);
+        try db.set("b", "2", .Upsert);
+        try db.set("c", "3", .Upsert);
+
+        const dist = try txn.estimateRange(db, "a", null, "c", null);
+        try expect(dist >= 0);
+
+        const seq0 = try db.sequence(1);
+        const seq1 = try db.sequence(1);
+        try expectEqual(seq0 + 1, seq1);
+
+        const canary = lmdb.Transaction.Canary{ .x = 1, .y = 2, .z = 3, .v = 0 };
+        try txn.canaryPut(&canary);
+        try txn.commit();
+    }
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadOnly });
+        defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const got = try txn.canaryGet();
+        try expectEqual(@as(u64, 1), got.x);
+        try expectEqual(@as(u64, 2), got.y);
+        try expectEqual(@as(u64, 3), got.z);
+
+        const db = try txn.database(null, .{});
+        const seq = try db.sequence(0);
+        try expect(seq >= 1);
+    }
+}
+
+test "cursor helpers and drop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .max_dbs = 16 });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    {
+        var wtxn = try env.transaction(.{ .mode = .ReadWrite });
+        errdefer wtxn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const db = try wtxn.database(null, .{});
+        try db.set("a", "1", .Upsert);
+        try db.set("c", "3", .Upsert);
+        try db.set("e", "5", .Upsert);
+        try wtxn.commit();
+    }
+
+    {
+        var rtxn = try env.transaction(.{ .mode = .ReadOnly });
+        errdefer rtxn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const db = try rtxn.database(null, .{});
+
+        const entry = try rtxn.getEqualOrGreat("b");
+        try expect(entry != null);
+        try expectEqualSlices(u8, "c", entry.?.key);
+
+        var cursor = try db.cursor();
+        defer cursor.deinit();
+
+        var ctx_value: u8 = 9;
+        try cursor.setUserctx(&ctx_value);
+        const ctx_ptr = cursor.getUserctx();
+        try expect(ctx_ptr != null);
+        try expectEqual(@as(*u8, @ptrCast(ctx_ptr.?)), &ctx_value);
+
+        _ = try cursor.goToFirst();
+        try cursor.reset();
+
+        try rtxn.releaseAllCursors(true);
+        try rtxn.abort();
+
+        var rtxn2 = try env.transaction(.{ .mode = .ReadOnly });
+        errdefer rtxn2.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        try cursor.renew(rtxn2);
+        _ = try cursor.goToFirst();
+        try rtxn2.abort();
+    }
+
+    {
+        var wtxn = try env.transaction(.{ .mode = .ReadWrite });
+        errdefer wtxn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const name: [*:0]const u8 = "dropme\x00";
+        const db = try wtxn.database(name, .{ .create = true });
+        try db.drop(true);
+        try wtxn.commit();
+    }
+
+    {
+        const rtxn = try env.transaction(.{ .mode = .ReadOnly });
+        defer rtxn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const name: [*:0]const u8 = "dropme\x00";
+        try std.testing.expectError(error.MDBX_NOTFOUND, rtxn.database(name, .{}));
+    }
+}
+
+test "nested transactions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const env = try open(tmp.dir, .{});
+        defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+        {
+            var txn = try env.transaction(.{ .mode = .ReadWrite });
+            errdefer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+            try txn.set("k", "v1", .Upsert);
+
+            var child = try txn.nested(.{ .mode = .ReadWrite });
+            errdefer child.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+            try child.set("k", "v2", .Upsert);
+            try child.commit();
+
+            const val = try txn.get("k");
+            try expect(val != null);
+            try expectEqualSlices(u8, "v2", val.?);
+
+            try txn.commit();
+        }
+
+        {
+            const txn = try env.transaction(.{ .mode = .ReadOnly });
+            defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+            const val = try txn.get("k");
+            try expect(val != null);
+            try expectEqualSlices(u8, "v2", val.?);
+        }
+    }
+
+    {
+        const batched_env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+        defer batched_env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+        var bio: lmdb.BatchedDB = undefined;
+        try bio.init(batched_env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
+        defer bio.deinit();
+
+        var outer = try bio.transaction(.{ .mode = .ReadWrite });
+        errdefer outer.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+        var child = try outer.nested(.{ .mode = .ReadWrite });
+        errdefer child.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+        try child.set("kb", "vb2", .Upsert);
+        try child.commit();
+
+        const cb = struct {
+            fn run(ctx: ?*anyopaque, success: bool) void {
+                _ = ctx;
+                _ = success;
+            }
+        }.run;
+        try std.testing.expectError(error.NestedTransaction, child.commitAsync(cb, null));
+
+        try outer.commit();
+    }
+}
+
+test "transaction reset renew park and userctx" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{});
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    {
+        var wtxn = try env.transaction(.{ .mode = .ReadWrite });
+        errdefer wtxn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        try wtxn.set("k", "v", .Upsert);
+        try wtxn.commit();
+    }
+
+    var ctx_value: u8 = 42;
+    var rtxn = try env.transaction(.{ .mode = .ReadOnly });
+    errdefer rtxn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+    try rtxn.setUserctx(&ctx_value);
+    const ctx_ptr = rtxn.getUserctx();
+    try expect(ctx_ptr != null);
+    try expectEqual(@as(*u8, @ptrCast(ctx_ptr.?)), &ctx_value);
+
+    const v1 = try rtxn.get("k");
+    try expect(v1 != null);
+    try expectEqualSlices(u8, "v", v1.?);
+
+    try rtxn.reset();
+    try rtxn.renew();
+
+    try rtxn.park(false);
+    try rtxn.unpark(true);
+
+    const v2 = try rtxn.get("k");
+    try expect(v2 != null);
+    try expectEqualSlices(u8, "v", v2.?);
+
+    try rtxn.abort();
+}
+
+test "batched io basic and concurrent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    var bio: lmdb.BatchedDB = undefined;
+    try bio.init(env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
+    defer bio.deinit();
+
+    {
+        var txn = try bio.transaction(.{ .mode = .ReadWrite });
+        try txn.set("k1", "v1", .Upsert);
+        try txn.commit();
+    }
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadOnly });
+        defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const v = try txn.get("k1");
+        try expect(v != null);
+        try expectEqualSlices(u8, "v1", v.?);
+    }
+
+    var t1 = try std.Thread.spawn(.{}, struct {
+        fn run(bio_ptr: *lmdb.BatchedDB, key: []const u8, value: []const u8) void {
+            var txn = bio_ptr.transaction(.{ .mode = .ReadWrite }) catch @panic("batched begin failed");
+            txn.set(key, value, .Upsert) catch @panic("batched set failed");
+            txn.commit() catch @panic("batched commit failed");
+        }
+    }.run, .{ &bio, "k2", "v2" });
+
+    var t2 = try std.Thread.spawn(.{}, struct {
+        fn run(bio_ptr: *lmdb.BatchedDB, key: []const u8, value: []const u8) void {
+            var txn = bio_ptr.transaction(.{ .mode = .ReadWrite }) catch @panic("batched begin failed");
+            txn.set(key, value, .Upsert) catch @panic("batched set failed");
+            txn.commit() catch @panic("batched commit failed");
+        }
+    }.run, .{ &bio, "k3", "v3" });
+
+    t1.join();
+    t2.join();
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadOnly });
+        defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        const v2 = try txn.get("k2");
+        const v3 = try txn.get("k3");
+        try expect(v2 != null);
+        try expect(v3 != null);
+        try expectEqualSlices(u8, "v2", v2.?);
+        try expectEqualSlices(u8, "v3", v3.?);
+    }
+}
+
+test "batched transaction reset and userctx" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    var bio: lmdb.BatchedDB = undefined;
+    try bio.init(env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
+    defer bio.deinit();
+
+    {
+        var wtxn = try bio.transaction(.{ .mode = .ReadWrite });
+        errdefer wtxn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+        try wtxn.set("k", "v", .Upsert);
+        try wtxn.commit();
+    }
+
+    var ctx_value: u8 = 7;
+    var rtxn = try bio.transaction(.{ .mode = .ReadOnly });
+    errdefer rtxn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+
+    try rtxn.setUserctx(&ctx_value);
+    const ctx_ptr = rtxn.getUserctx();
+    try expect(ctx_ptr != null);
+    try expectEqual(@as(*u8, @ptrCast(ctx_ptr.?)), &ctx_value);
+
+    try rtxn.reset();
+    try rtxn.renew();
+    try rtxn.park(false);
+    try rtxn.unpark(true);
+
+    const v = try rtxn.get("k");
+    try expect(v != null);
+    try expectEqualSlices(u8, "v", v.?);
+
+    try rtxn.abort();
+}
+
+test "batched io commit async callback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    var bio: lmdb.BatchedDB = undefined;
+    try bio.init(env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1, .callback_capacity = 16 });
+    defer bio.deinit();
+
+    const Ctx = struct {
+        called: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    };
+    var ctx = Ctx{};
+
+    const cb = struct {
+        fn run(ptr: ?*anyopaque, success: bool) void {
+            const c = @as(*Ctx, @ptrCast(@alignCast(ptr.?)));
+            std.debug.assert(success);
+            _ = c.called.fetchAdd(1, .acq_rel);
+        }
+    }.run;
+
+    {
+        var txn = try bio.transaction(.{ .mode = .ReadWrite });
+        try txn.set("ka", "va", .Upsert);
+        try txn.commitAsync(cb, &ctx);
+    }
+    {
+        var txn = try bio.transaction(.{ .mode = .ReadWrite });
+        try txn.set("kb", "vb", .Upsert);
+        try txn.commitAsync(cb, &ctx);
+    }
+
+    // Wait for callbacks to fire (sync thread).
+    var spins: u32 = 0;
+    while (ctx.called.load(.acquire) < 2 and spins < 1000) : (spins += 1) {
+        std.Thread.sleep(1_000_000);
+    }
+
+    try expectEqual(@as(u32, 2), ctx.called.load(.acquire));
+
+    const txn = try env.transaction(.{ .mode = .ReadOnly });
+    defer txn.abort() catch |e| std.debug.panic("Failed to abort transaction: error {any}", .{e});
+    const va = try txn.get("ka");
+    const vb = try txn.get("kb");
+    try expectEqualSlices(u8, "va", va.?);
+    try expectEqualSlices(u8, "vb", vb.?);
+}
+
+test "batched io async callback respects failed seq" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
+
+    var bio: lmdb.BatchedDB = undefined;
+    try bio.init(env, allocator, .{ .sync_interval_ms = 200, .sync_bytes = 1, .callback_capacity = 8 });
+    defer bio.deinit();
+
+    const Ctx = struct {
+        called: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+        success: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    };
+    var ctx = Ctx{};
+
+    const cb = struct {
+        fn run(ptr: ?*anyopaque, success: bool) void {
+            const c = @as(*Ctx, @ptrCast(@alignCast(ptr.?)));
+            c.success.store(success, .release);
+            _ = c.called.fetchAdd(1, .acq_rel);
+        }
+    }.run;
+
+    {
+        var txn = try bio.transaction(.{ .mode = .ReadWrite });
+        try txn.set("kf", "vf", .Upsert);
+        try txn.commitAsync(cb, &ctx);
+    }
+
+    const seq = bio.issued_seq.load(.acquire);
+    bio.failed_seq.store(seq, .release);
+
+    var spins: u32 = 0;
+    while (ctx.called.load(.acquire) < 1 and spins < 2000) : (spins += 1) {
+        std.Thread.sleep(1_000_000);
+    }
+
+    try expectEqual(@as(u32, 1), ctx.called.load(.acquire));
+    try expectEqual(false, ctx.success.load(.acquire));
 }
 
 test "multiple named databases" {

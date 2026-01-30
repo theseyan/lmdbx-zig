@@ -21,6 +21,11 @@ pub const Options = struct {
     no_meta_sync: bool = false,
     safe_nosync: bool = false,
     unsafe_nosync: bool = false,
+    sync_durable: bool = true,
+    /// Autosync period in milliseconds. 0 disables periodic autosync.
+    sync_period_ms: u32 = 0,
+    /// Autosync threshold in bytes. 0 disables threshold-based autosync.
+    sync_bytes: usize = 0,
     mode: u16 = 0o664,
 };
 
@@ -45,6 +50,17 @@ pub const Info = struct {
     mode: u32,
     sys_pagesize: u32,
     unsync_volume: u64
+};
+
+/// Environment flags info
+pub const FlagsInfo = struct {
+    raw: u32,
+    no_meta_sync: bool,
+    safe_nosync: bool,
+    unsafe_nosync: bool,
+    sync_durable: bool,
+    write_map: bool,
+    exclusive: bool,
 };
 
 /// Database geometry options
@@ -89,8 +105,17 @@ pub fn init(path: [*:0]const u8, options: Options) !Environment {
     if (options.no_meta_sync) flags |= c.MDBX_NOMETASYNC;
     if (options.safe_nosync) flags |= c.MDBX_SAFE_NOSYNC;
     if (options.unsafe_nosync) flags |= c.MDBX_UTTERLY_NOSYNC;
+    if (options.sync_durable) flags |= c.MDBX_SYNC_DURABLE;
 
     try throw(c.mdbx_env_open(env.ptr, path, flags, options.mode));
+
+    if (options.sync_period_ms != 0) {
+        const seconds_16dot16: u64 = (@as(u64, options.sync_period_ms) << 16) / 1000;
+        try throw(c.mdbx_env_set_option(env.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_period)), seconds_16dot16));
+    }
+    if (options.sync_bytes != 0) {
+        try throw(c.mdbx_env_set_option(env.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_bytes)), options.sync_bytes));
+    }
 
     return env;
 }
@@ -100,9 +125,14 @@ pub fn deinit(self: Environment) !void {
     try throw(c.mdbx_env_close(self.ptr));
 }
 
-/// Syncs environment to disk.
-pub fn sync(self: Environment) !void {
-    try throw(c.mdbx_env_sync(self.ptr));
+/// Syncs environment to disk with control flags.
+/// Returns true if there is no pending data to flush, false otherwise.
+pub fn sync(self: Environment, force: bool, nonblock: bool) !bool {
+    const rc = c.mdbx_env_sync_ex(self.ptr, force, nonblock);
+    if (rc == c.MDBX_RESULT_TRUE) return true;
+    if (rc == 0) return false;
+    try throw(rc);
+    return false;
 }
 
 /// Fetch statistics from a given environment.
@@ -136,6 +166,39 @@ pub fn info(self: Environment) !Info {
         .sys_pagesize = result.mi_sys_pagesize,
         .unsync_volume = result.mi_unsync_volume
     };
+}
+
+/// Fetch environment flags.
+pub fn flagsInfo(self: Environment) !FlagsInfo {
+    var flags: c_uint = 0;
+    try throw(c.mdbx_env_get_flags(self.ptr, &flags));
+    const no_meta_sync = (flags & c.MDBX_NOMETASYNC) != 0;
+    const safe_nosync = (flags & c.MDBX_SAFE_NOSYNC) != 0;
+    const unsafe_nosync = (flags & c.MDBX_UTTERLY_NOSYNC) == c.MDBX_UTTERLY_NOSYNC;
+    const sync_durable = !no_meta_sync and !safe_nosync and !unsafe_nosync;
+    return .{
+        .raw = @as(u32, @intCast(flags)),
+        .no_meta_sync = no_meta_sync,
+        .safe_nosync = safe_nosync,
+        .unsafe_nosync = unsafe_nosync,
+        .sync_durable = sync_durable,
+        .write_map = (flags & c.MDBX_WRITEMAP) != 0,
+        .exclusive = (flags & c.MDBX_EXCLUSIVE) != 0,
+    };
+}
+
+/// Fetch current autosync bytes threshold.
+pub fn syncBytes(self: Environment) !usize {
+    var value: u64 = 0;
+    try throw(c.mdbx_env_get_option(self.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_bytes)), &value));
+    return @as(usize, @intCast(value));
+}
+
+/// Fetch current autosync period (16.16 seconds).
+pub fn syncPeriod(self: Environment) !u32 {
+    var value: u64 = 0;
+    try throw(c.mdbx_env_get_option(self.ptr, @as(c_uint, @bitCast(c.MDBX_opt_sync_period)), &value));
+    return @as(u32, @intCast(value));
 }
 
 /// Set database geomtry (scaling)

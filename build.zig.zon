@@ -10,6 +10,10 @@
 
         // We need this until https://github.com/ziglang/zig/pull/20081 gets merged
         .cpu_features = .{ .url = "https://github.com/slyshykO/cpu_model/archive/refs/heads/main.tar.gz", .hash = "122016a054f0c745d27cd20d02ebbef0c091d0f9c124061afd58c76b25628a3ea353" },
+        .zbench = .{
+            .url = "https://github.com/hendriknielaender/zbench/archive/v0.12.0.tar.gz",
+            .hash = "zbench-0.11.1-YTdc7zkmAQBWI99esNFueJc9GuzK-KaU6Nfr1ZXhNGmc",
+        },
     },
 
     .paths = .{

@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const mdbx = b.addModule("lmdbx", .{ .root_source_file = b.path("src/lib.zig") });
+    const zbench_dep = b.dependency("zbench", .{});
+    const zbench_mod = b.addModule("zbench", .{ .root_source_file = zbench_dep.path("zbench.zig") });
 
     // Add CPU features polyfill until https://github.com/ziglang/zig/pull/20081 gets merged
     const cpuf_dep = b.dependency("cpu_features", .{});
@@ -103,14 +105,14 @@ pub fn build(b: *std.Build) void {
 
     // Benchmarks
     const bench_mod = b.createModule(.{
-        .root_source_file = b.path("benchmarks/main.zig"),
+        .root_source_file = b.path("benchmarks/bench.zig"),
         .target = target,
         .optimize = if (IS_DEV) .Debug else .ReleaseFast,
         .link_libc = true,
-        .imports = &.{.{ .name = "lmdbx", .module = mdbx }},
+        .imports = &.{ .{ .name = "lmdbx", .module = mdbx }, .{ .name = "zbench", .module = zbench_mod } },
     });
     const bench = b.addExecutable(.{
-        .name = "lmdbx-benchmark",
+        .name = "lmdbx-bench",
         .root_module = bench_mod,
     });
 
@@ -121,5 +123,52 @@ pub fn build(b: *std.Build) void {
     bench.link_z_relro = true;
 
     const bench_runner = b.addRunArtifact(bench);
+    if (b.args) |args| {
+        bench_runner.addArgs(args);
+    }
     b.step("bench", "Run libMDBX benchmarks").dependOn(&bench_runner.step);
+
+    // Multithreaded benchmark
+    const bench_mt_mod = b.createModule(.{
+        .root_source_file = b.path("benchmarks/multithreaded.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{.{ .name = "lmdbx", .module = mdbx }},
+    });
+    const bench_mt = b.addExecutable(.{
+        .name = "lmdbx-bench-mt",
+        .root_module = bench_mt_mod,
+    });
+
+    b.installArtifact(bench_mt);
+    bench_mt.link_gc_sections = true;
+    bench_mt.link_z_relro = true;
+
+    const bench_mt_runner = b.addRunArtifact(bench_mt);
+    if (b.args) |args| {
+        bench_mt_runner.addArgs(args);
+    }
+    b.step("bench-mt", "Run multithreaded libMDBX benchmark").dependOn(&bench_mt_runner.step);
+
+    // DB generator
+    const gen_mod = b.createModule(.{
+        .root_source_file = b.path("benchmarks/generate_db.zig"),
+        .target = target,
+        .optimize = if (IS_DEV) .Debug else .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{.{ .name = "lmdbx", .module = mdbx }},
+    });
+    const gen = b.addExecutable(.{
+        .name = "lmdbx-generate-db",
+        .root_module = gen_mod,
+    });
+    b.installArtifact(gen);
+    gen.link_gc_sections = true;
+    gen.link_z_relro = true;
+    const gen_runner = b.addRunArtifact(gen);
+    if (b.args) |args| {
+        gen_runner.addArgs(args);
+    }
+    b.step("gen-db", "Generate MDBX database").dependOn(&gen_runner.step);
 }
