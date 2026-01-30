@@ -2,15 +2,15 @@ const std = @import("std");
 const c = @import("c.zig");
 const errors = @import("errors.zig");
 const Environment = @import("Environment.zig");
-const Transaction = @import("Transaction.zig");
+const BaseTransaction = @import("Transaction.zig");
 
 const throw = errors.throw;
 
-const BatchedIO = @This();
+const BatchedDB = @This();
 
 pub const Options = struct {
     /// Sync interval in milliseconds.
-    sync_interval_ms: u32 = 5,
+    sync_interval_ms: u32 = 2,
     /// If non-zero, trigger early sync when unsynced volume reaches this threshold.
     sync_bytes: u64 = 0,
     /// Max pending callbacks. 0 disables callback queue.
@@ -33,8 +33,8 @@ failed_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Valu
 last_sync_ns: u64,
 thread: ?std.Thread = null,
 
-pub fn init(self: *BatchedIO, env: Environment, allocator: std.mem.Allocator, options: Options) !void {
-    self.* = BatchedIO{
+pub fn init(self: *BatchedDB, env: Environment, allocator: std.mem.Allocator, options: Options) !void {
+    self.* = BatchedDB{
         .env = env,
         .sync_interval_ns = @as(u64, options.sync_interval_ms) * 1_000_000,
         .sync_bytes = options.sync_bytes,
@@ -57,7 +57,7 @@ pub fn init(self: *BatchedIO, env: Environment, allocator: std.mem.Allocator, op
     self.thread = try std.Thread.spawn(.{}, syncLoop, .{self});
 }
 
-pub fn deinit(self: *BatchedIO) void {
+pub fn deinit(self: *BatchedDB) void {
     self.stop.store(true, .release);
     _ = self.sync_counter.fetchAdd(1, .release);
     std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
@@ -68,41 +68,45 @@ pub fn deinit(self: *BatchedIO) void {
     }
 }
 
-pub fn beginWrite(self: *BatchedIO) !BatchedTxn {
-    const txn = try self.env.transaction(.{ .mode = .ReadWrite });
-    return .{ .io = self, .txn = txn };
+pub fn transaction(self: *BatchedDB, options: BaseTransaction.Options) !Transaction {
+    const txn = try self.env.transaction(options);
+    return .{
+        .db = if (options.mode == .ReadWrite) self else null,
+        .txn = txn,
+    };
 }
 
-pub fn beginRead(self: *BatchedIO) !Transaction {
-    return try self.env.transaction(.{ .mode = .ReadOnly });
-}
+pub const Transaction = struct {
+    db: ?*BatchedDB,
+    txn: BaseTransaction,
 
-pub const BatchedTxn = struct {
-    io: *BatchedIO,
-    txn: Transaction,
-
-    pub fn abort(self: BatchedTxn) !void {
+    pub fn abort(self: Transaction) !void {
         try self.txn.abort();
     }
 
-    pub fn commit(self: BatchedTxn) !void {
-        const seq = self.io.issued_seq.fetchAdd(1, .monotonic) + 1;
-        try throw(c.mdbx_txn_commit(self.txn.ptr));
-        try self.io.waitForDurable(seq);
+    pub fn commit(self: Transaction) !void {
+        if (self.db) |db| {
+            const seq = db.issued_seq.fetchAdd(1, .monotonic) + 1;
+            try throw(c.mdbx_txn_commit(self.txn.ptr));
+            try db.waitForDurable(seq);
+            return;
+        }
+        try self.txn.commit();
     }
 
-    pub fn commitAsync(self: BatchedTxn, cb: CommitCallback, ctx: ?*anyopaque) !void {
-        const seq = self.io.issued_seq.fetchAdd(1, .monotonic) + 1;
+    pub fn commitAsync(self: Transaction, cb: CommitCallback, ctx: ?*anyopaque) !void {
+        const db = self.db orelse return error.ReadOnlyTransaction;
+        const seq = db.issued_seq.fetchAdd(1, .monotonic) + 1;
         try throw(c.mdbx_txn_commit(self.txn.ptr));
         while (true) {
-            if (self.io.failed_seq.load(.acquire) >= seq) {
+            if (db.failed_seq.load(.acquire) >= seq) {
                 cb(ctx, false);
                 return;
             }
-            self.io.enqueueCallback(seq, cb, ctx) catch |e| switch (e) {
+            db.enqueueCallback(seq, cb, ctx) catch |e| switch (e) {
                 error.CallbackQueueFull => {
-                    const cur = self.io.sync_counter.load(.acquire);
-                    std.Thread.Futex.wait(&self.io.sync_counter, cur);
+                    const cur = db.sync_counter.load(.acquire);
+                    std.Thread.Futex.wait(&db.sync_counter, cur);
                     continue;
                 },
                 else => return e,
@@ -111,39 +115,39 @@ pub const BatchedTxn = struct {
         }
     }
 
-    pub fn inner(self: BatchedTxn) Transaction {
+    pub fn inner(self: Transaction) BaseTransaction {
         return self.txn;
     }
 
-    pub fn get(self: BatchedTxn, key: []const u8) !?[]const u8 {
+    pub fn get(self: Transaction, key: []const u8) !?[]const u8 {
         return try self.txn.get(key);
     }
 
-    pub fn set(self: BatchedTxn, key: []const u8, value: []const u8, flag: @import("Database.zig").SetFlag) !void {
+    pub fn set(self: Transaction, key: []const u8, value: []const u8, flag: @import("Database.zig").SetFlag) !void {
         try self.txn.set(key, value, flag);
     }
 
-    pub fn getSerialized(self: BatchedTxn, key: []const u8, comptime ValueType: type) !?ValueType {
+    pub fn getSerialized(self: Transaction, key: []const u8, comptime ValueType: type) !?ValueType {
         return try self.txn.getSerialized(key, ValueType);
     }
 
-    pub fn getSerializedAlloc(self: BatchedTxn, key: []const u8, comptime ValueType: type, allocator: std.mem.Allocator) !?ValueType {
+    pub fn getSerializedAlloc(self: Transaction, key: []const u8, comptime ValueType: type, allocator: std.mem.Allocator) !?ValueType {
         return try self.txn.getSerializedAlloc(key, ValueType, allocator);
     }
 
-    pub fn setSerialized(self: BatchedTxn, key: []const u8, comptime ValueType: type, value: ValueType, buffer: anytype) !void {
+    pub fn setSerialized(self: Transaction, key: []const u8, comptime ValueType: type, value: ValueType, buffer: anytype) !void {
         try self.txn.setSerialized(key, ValueType, value, buffer);
     }
 
-    pub fn delete(self: BatchedTxn, key: []const u8) !void {
+    pub fn delete(self: Transaction, key: []const u8) !void {
         try self.txn.delete(key);
     }
 
-    pub fn cursor(self: BatchedTxn) !@import("Cursor.zig") {
+    pub fn cursor(self: Transaction) !@import("Cursor.zig") {
         return try self.txn.cursor();
     }
 
-    pub fn database(self: BatchedTxn, name: ?[*:0]const u8, options: @import("Database.zig").Options) !@import("Database.zig") {
+    pub fn database(self: Transaction, name: ?[*:0]const u8, options: @import("Database.zig").Options) !@import("Database.zig") {
         return try self.txn.database(name, options);
     }
 };
@@ -157,7 +161,7 @@ const CommitWaiter = struct {
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
-fn waitForDurable(self: *BatchedIO, seq: u64) !void {
+fn waitForDurable(self: *BatchedDB, seq: u64) !void {
     if (self.durable_seq.load(.acquire) >= seq) {
         return;
     }
@@ -174,7 +178,7 @@ fn waitForDurable(self: *BatchedIO, seq: u64) !void {
     }
 }
 
-fn enqueueCallback(self: *BatchedIO, seq: u64, cb: CommitCallback, ctx: ?*anyopaque) !void {
+fn enqueueCallback(self: *BatchedDB, seq: u64, cb: CommitCallback, ctx: ?*anyopaque) !void {
     const buf = self.callbacks orelse return error.CallbacksDisabled;
     const cap = self.callback_capacity;
 
@@ -194,7 +198,7 @@ fn enqueueCallback(self: *BatchedIO, seq: u64, cb: CommitCallback, ctx: ?*anyopa
     }
 }
 
-fn syncLoop(self: *BatchedIO) void {
+fn syncLoop(self: *BatchedDB) void {
     while (true) {
         if (self.stop.load(.acquire)) return;
         if (self.last_sync_ns == 0) {
@@ -239,7 +243,7 @@ fn syncLoop(self: *BatchedIO) void {
     }
 }
 
-fn drainCallbacks(self: *BatchedIO, threshold: u64, success: bool) void {
+fn drainCallbacks(self: *BatchedDB, threshold: u64, success: bool) void {
     const buf = self.callbacks orelse return;
     const cap = self.callback_capacity;
     while (true) {

@@ -169,8 +169,8 @@ fn runBenchmark(
     key_size: usize,
     value_size: usize,
 ) !BenchResult {
-    var batched_io_storage: lmdb.BatchedIO = undefined;
-    var batched_io_ptr: ?*lmdb.BatchedIO = null;
+    var batched_io_storage: lmdb.BatchedDB = undefined;
+    var batched_io_ptr: ?*lmdb.BatchedDB = null;
     if (use_batched and bench.kind == .Write) {
         const cb_capacity = threads * 4096;
         try batched_io_storage.init(env, allocator, .{
@@ -253,7 +253,7 @@ fn runBenchmark(
 
 fn worker(
     env: lmdb.Environment,
-    batched_io: ?*lmdb.BatchedIO,
+    batched_io: ?*lmdb.BatchedDB,
     end_time: i128,
     bench: BenchSpec,
     precomputed: Precomputed,
@@ -288,10 +288,10 @@ fn worker(
 
     while (std.time.nanoTimestamp() < end_time) {
         var txn_opt: ?lmdb.Transaction = null;
-        var batched_opt: ?lmdb.BatchedIO.BatchedTxn = null;
+        var batched_opt: ?lmdb.BatchedDB.Transaction = null;
 
         if (bench.kind == .Write and batched_io != null) {
-            batched_opt = batched_io.?.beginWrite() catch @panic("batched txn begin failed");
+            batched_opt = batched_io.?.transaction(.{ .mode = .ReadWrite }) catch @panic("batched txn begin failed");
         } else if (bench.kind == .Read) {
             txn_opt = env.transaction(.{ .mode = .ReadOnly }) catch @panic("txn begin failed");
         } else {
@@ -397,7 +397,7 @@ fn usage(w: *std.Io.Writer) !void {
         \\  --key-size=N         key size in bytes (default 16)
         \\  --value-size=N       value size in bytes (default 512)
         \\  --path=PATH          open existing database at PATH (no init)
-        \\  --batched-io         use BatchedIO for write transactions
+        \\  --batched-io         use BatchedDB for write transactions
         \\  --safe-nosync        enable MDBX_SAFE_NOSYNC
         \\  --no-meta-sync       enable MDBX_NOMETASYNC
         \\  --unsafe-nosync      enable MDBX_UTTERLY_NOSYNC

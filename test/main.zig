@@ -109,12 +109,12 @@ test "batched io basic and concurrent" {
     const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
-    var bio: lmdb.BatchedIO = undefined;
+    var bio: lmdb.BatchedDB = undefined;
     try bio.init(env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
     defer bio.deinit();
 
     {
-        var txn = try bio.beginWrite();
+        var txn = try bio.transaction(.{ .mode = .ReadWrite });
         try txn.set("k1", "v1", .Upsert);
         try txn.commit();
     }
@@ -128,16 +128,16 @@ test "batched io basic and concurrent" {
     }
 
     var t1 = try std.Thread.spawn(.{}, struct {
-        fn run(bio_ptr: *lmdb.BatchedIO, key: []const u8, value: []const u8) void {
-            var txn = bio_ptr.beginWrite() catch @panic("batched begin failed");
+        fn run(bio_ptr: *lmdb.BatchedDB, key: []const u8, value: []const u8) void {
+            var txn = bio_ptr.transaction(.{ .mode = .ReadWrite }) catch @panic("batched begin failed");
             txn.set(key, value, .Upsert) catch @panic("batched set failed");
             txn.commit() catch @panic("batched commit failed");
         }
     }.run, .{ &bio, "k2", "v2" });
 
     var t2 = try std.Thread.spawn(.{}, struct {
-        fn run(bio_ptr: *lmdb.BatchedIO, key: []const u8, value: []const u8) void {
-            var txn = bio_ptr.beginWrite() catch @panic("batched begin failed");
+        fn run(bio_ptr: *lmdb.BatchedDB, key: []const u8, value: []const u8) void {
+            var txn = bio_ptr.transaction(.{ .mode = .ReadWrite }) catch @panic("batched begin failed");
             txn.set(key, value, .Upsert) catch @panic("batched set failed");
             txn.commit() catch @panic("batched commit failed");
         }
@@ -165,7 +165,7 @@ test "batched io commit async callback" {
     const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
-    var bio: lmdb.BatchedIO = undefined;
+    var bio: lmdb.BatchedDB = undefined;
     try bio.init(env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1, .callback_capacity = 16 });
     defer bio.deinit();
 
@@ -183,12 +183,12 @@ test "batched io commit async callback" {
     }.run;
 
     {
-        var txn = try bio.beginWrite();
+        var txn = try bio.transaction(.{ .mode = .ReadWrite });
         try txn.set("ka", "va", .Upsert);
         try txn.commitAsync(cb, &ctx);
     }
     {
-        var txn = try bio.beginWrite();
+        var txn = try bio.transaction(.{ .mode = .ReadWrite });
         try txn.set("kb", "vb", .Upsert);
         try txn.commitAsync(cb, &ctx);
     }
@@ -216,7 +216,7 @@ test "batched io async callback respects failed seq" {
     const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
-    var bio: lmdb.BatchedIO = undefined;
+    var bio: lmdb.BatchedDB = undefined;
     try bio.init(env, allocator, .{ .sync_interval_ms = 200, .sync_bytes = 1, .callback_capacity = 8 });
     defer bio.deinit();
 
@@ -235,7 +235,7 @@ test "batched io async callback respects failed seq" {
     }.run;
 
     {
-        var txn = try bio.beginWrite();
+        var txn = try bio.transaction(.{ .mode = .ReadWrite });
         try txn.set("kf", "vf", .Upsert);
         try txn.commitAsync(cb, &ctx);
     }
