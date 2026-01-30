@@ -215,7 +215,7 @@ fn syncLoop(self: *BatchedIO) void {
             self.drainCallbacks(target, true);
             continue;
         }
-        const clean = self.env.sync(false, true) catch |err| switch (err) {
+        _ = self.env.sync(false, true) catch |err| switch (err) {
             error.MDBX_BUSY => {
                 self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
                 continue;
@@ -230,10 +230,6 @@ fn syncLoop(self: *BatchedIO) void {
                 continue;
             },
         };
-        if (!clean) {
-            self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
-            continue;
-        }
         updateSeqMax(&self.durable_seq, target);
         self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
 
