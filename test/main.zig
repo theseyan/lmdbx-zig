@@ -804,3 +804,568 @@ fn setEntry(env: lmdb.Environment, i: u32) !void {
 
     try txn.commit();
 }
+
+// -----------------------------------------------------------------------------
+// New-API tests (Environment, Transaction, Database, Cursor extensions).
+// -----------------------------------------------------------------------------
+
+test "environment: path/maxKeySize/maxValSize/maxDbs/maxReaders" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 7, .max_readers = 17 });
+    defer env.deinit() catch unreachable;
+
+    const p = try env.path();
+    try expect(p.len > 0);
+
+    try expect(try env.maxKeySize(.{}) > 0);
+    try expect(try env.maxValSize(.{}) > 0);
+    try expect(try env.maxKeySize(.{ .dup_sort = true }) > 0);
+
+    try expectEqual(@as(u32, 7), try env.maxDbs());
+    try expect(try env.maxReaders() >= 17);
+
+    const fd = try env.fd();
+    try expect(fd > 0);
+}
+
+test "environment: info exposes geometry, pgop_stat and dxb_fsize" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 4 });
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("a", "alpha", .Upsert);
+        try txn.commit();
+    }
+    _ = try env.sync(true, false);
+
+    const i = try env.info();
+    try expect(i.geo.upper >= i.geo.current and i.geo.current >= i.geo.lower);
+    try expect(i.db_pagesize > 0);
+    try expect(i.sys_pagesize > 0);
+    try expect(i.dxb_fsize > 0);
+    try expect(i.pgop_stat.newly > 0 or i.pgop_stat.wops > 0);
+}
+
+test "environment: readerCheck and readerList" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("k", "v", .Upsert);
+        try txn.commit();
+    }
+
+    const rtxn = try env.transaction(.{ .mode = .ReadOnly });
+    defer rtxn.abort() catch unreachable;
+
+    try expectEqual(@as(u32, 0), try env.readerCheck());
+
+    const readers = try env.readerList(allocator);
+    defer allocator.free(readers);
+    try expect(readers.len >= 1);
+    try expect(readers[0].pid > 0);
+}
+
+test "transaction: info, id, getFlags, breakTxn" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("seed", "value", .Upsert);
+        try txn.commit();
+    }
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadOnly });
+        defer txn.abort() catch unreachable;
+
+        const f = txn.getFlags();
+        try expect(f.read_only);
+        try expect(!f.dirty);
+        try expect(!f.finished);
+
+        try expect(txn.id() > 0);
+
+        const i = try txn.info(true);
+        try expect(i.txn_id > 0);
+        try expectEqual(@as(u64, 0), i.space_dirty);
+        try expect(i.space_limit_hard >= i.space_limit_soft);
+    }
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("x", "y", .Upsert);
+        try txn.breakTxn();
+        const flags_after = txn.getFlags();
+        try expect(flags_after.err);
+        txn.abort() catch {};
+    }
+}
+
+test "transaction: commitWithLatency returns sane figures" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    const txn = try env.transaction(.{ .mode = .ReadWrite });
+    try txn.set("key", "val", .Upsert);
+
+    const lat = try txn.commitWithLatency();
+    try expect(lat.whole >= lat.write);
+}
+
+test "database: flagsState and dupSortDepthMask" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 4 });
+    defer env.deinit() catch unreachable;
+
+    const txn = try env.transaction(.{ .mode = .ReadWrite });
+    errdefer txn.abort() catch unreachable;
+
+    const db = try txn.database("dups", .{ .create = true, .dup_sort = true });
+
+    const fs = try db.flagsState();
+    try expect(fs.options.dup_sort);
+    try expect(fs.state.fresh);
+    try expect(fs.state.created);
+
+    try db.set("k", "v1", .Upsert);
+    try db.set("k", "v2", .Upsert);
+    try db.set("k", "v3", .Upsert);
+
+    const mask = try db.dupSortDepthMask();
+    try expect(mask != 0);
+
+    try txn.commit();
+}
+
+test "cursor: count for dupsort, dup positioning and nextNoDup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 4 });
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        const db = try txn.database("d", .{ .create = true, .dup_sort = true });
+
+        try db.set("k1", "a", .Upsert);
+        try db.set("k1", "b", .Upsert);
+        try db.set("k1", "c", .Upsert);
+        try db.set("k2", "x", .Upsert);
+        try db.set("k2", "y", .Upsert);
+
+        try txn.commit();
+    }
+
+    const txn = try env.transaction(.{ .mode = .ReadOnly });
+    defer txn.abort() catch unreachable;
+
+    const db = try txn.database("d", .{ .dup_sort = true });
+    const cur = try db.cursor();
+    defer cur.deinit();
+
+    _ = try cur.goToFirst();
+    try expectEqual(@as(usize, 3), try cur.count());
+
+    const first_dup = (try cur.firstDup()).?;
+    try expectEqualSlices(u8, "a", first_dup.value);
+    const last_dup = (try cur.lastDup()).?;
+    try expectEqualSlices(u8, "c", last_dup.value);
+
+    _ = try cur.firstDup();
+    const next = (try cur.nextDup()).?;
+    try expectEqualSlices(u8, "b", next.value);
+
+    const skipped = (try cur.nextNoDup()).?;
+    try expectEqualSlices(u8, "k2", skipped.key);
+    try expectEqual(@as(usize, 2), try cur.count());
+}
+
+test "cursor: seekLowerBound exact and approximate" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("alpha", "1", .Upsert);
+        try txn.set("delta", "2", .Upsert);
+        try txn.set("kappa", "3", .Upsert);
+        try txn.commit();
+    }
+
+    const txn = try env.transaction(.{ .mode = .ReadOnly });
+    defer txn.abort() catch unreachable;
+
+    const cur = try txn.cursor();
+    defer cur.deinit();
+
+    const exact = (try cur.seekLowerBound("delta")).?;
+    try expect(exact.exact);
+    try expectEqualSlices(u8, "delta", exact.entry.key);
+    try expectEqualSlices(u8, "2", exact.entry.value);
+
+    const approx = (try cur.seekLowerBound("c")).?;
+    try expect(!approx.exact);
+    try expectEqualSlices(u8, "delta", approx.entry.key);
+
+    try expect((try cur.seekLowerBound("z")) == null);
+
+    const upper = (try cur.seekUpperBound("delta")).?;
+    try expectEqualSlices(u8, "kappa", upper.entry.key);
+}
+
+test "cursor: dbi handle is exposed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    const txn = try env.transaction(.{ .mode = .ReadWrite });
+    defer txn.abort() catch unreachable;
+
+    const db = try txn.database(null, .{});
+    const cur = try db.cursor();
+    defer cur.deinit();
+
+    try expectEqual(db.dbi, cur.dbi());
+}
+
+test "environment: static helpers" {
+    try expect(lmdb.Environment.defaultPagesize() > 0);
+
+    const ram = try lmdb.Environment.sysRamInfo();
+    try expect(ram.page_size > 0);
+    try expect(ram.total_pages > 0);
+
+    const db_lim = lmdb.Environment.dbSizeLimits(0);
+    try expect(db_lim.max > db_lim.min);
+
+    const key_lim = lmdb.Environment.keySizeLimits(0, .{});
+    try expect(key_lim.max > 0);
+
+    const val_lim = lmdb.Environment.valSizeLimits(0, .{ .dup_sort = true });
+    try expect(val_lim.max > 0);
+
+    try expect(lmdb.Environment.txnSizeMax(0) > 0);
+
+    const msg = lmdb.Environment.errorString(lmdb.c.MDBX_NOTFOUND);
+    try expect(msg.len > 0);
+}
+
+test "environment: setOption / getOption round-trips" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 4 });
+    defer env.deinit() catch unreachable;
+
+    try env.setOption(.rp_augment_limit, 999);
+    try expectEqual(@as(u64, 999), try env.getOption(.rp_augment_limit));
+}
+
+test "environment: pairSize4PageMax / valSize4PageMax" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    try expect(try env.pairSize4PageMax(.{}) > 0);
+    try expect(try env.valSize4PageMax(.{ .dup_sort = true }) > 0);
+}
+
+test "environment: deletePath removes files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const env = try open(std.testing.io, tmp.dir, .{});
+        try env.deinit();
+    }
+
+    const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    path_buffer[path_len] = 0;
+    const found = try lmdb.Environment.deletePath(path_buffer[0..path_len :0], .just_delete);
+    try expect(found);
+}
+
+test "database: getEx returns dup count" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 4 });
+    defer env.deinit() catch unreachable;
+
+    const txn = try env.transaction(.{ .mode = .ReadWrite });
+    errdefer txn.abort() catch unreachable;
+
+    const db = try txn.database("dups", .{ .create = true, .dup_sort = true });
+    try db.set("k", "a", .Upsert);
+    try db.set("k", "b", .Upsert);
+    try db.set("k", "c", .Upsert);
+
+    const r = (try db.getEx("k")).?;
+    try expectEqual(@as(usize, 3), r.count);
+
+    try expect(try db.getEx("missing") == null);
+    try txn.commit();
+}
+
+test "cursor: put with flag, del with flag, position queries" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 4 });
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        const db = try txn.database("d", .{ .create = true, .dup_sort = true });
+        const cur = try db.cursor();
+        defer cur.deinit();
+
+        try cur.put("k", "a", .Upsert);
+        try cur.put("k", "b", .Upsert);
+        try cur.put("k", "c", .Upsert);
+        try cur.put("z", "only", .Upsert);
+
+        _ = try cur.goToFirst();
+        try expect(cur.onFirst());
+        try expect(cur.onFirstDup());
+        try expect(!cur.onLast());
+
+        _ = try cur.lastDup();
+        try expect(cur.onLastDup());
+
+        _ = try cur.goToLast();
+        try expect(cur.onLast());
+
+        _ = try cur.goToFirst();
+        try cur.del(.AllDups);
+
+        try txn.commit();
+    }
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadOnly });
+        defer txn.abort() catch unreachable;
+        const db = try txn.database("d", .{ .dup_sort = true });
+        try expect(try db.get("k") == null);
+        try expect(try db.get("z") != null);
+    }
+}
+
+test "cursor: estimate distance and range delete" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        var i: u8 = 0;
+        while (i < 10) : (i += 1) {
+            const k = [_]u8{ 'k', '0' + i };
+            try txn.set(&k, "v", .Upsert);
+        }
+        try txn.commit();
+    }
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        const begin = try txn.cursor();
+        defer begin.deinit();
+        const end = try txn.cursor();
+        defer end.deinit();
+
+        _ = try begin.seek("k2");
+        _ = try end.seek("k7");
+
+        const dist = try begin.estimateDistance(end);
+        try expect(@abs(dist) >= 4 and @abs(dist) <= 6);
+
+        const removed = try begin.deleteRange(end, false);
+        try expect(removed == 5);
+
+        try txn.commit();
+    }
+}
+
+test "cursor: create + bind round-trip" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("hello", "world", .Upsert);
+        try txn.commit();
+    }
+
+    const txn = try env.transaction(.{ .mode = .ReadOnly });
+    defer txn.abort() catch unreachable;
+
+    const cur = try lmdb.Cursor.create(null);
+    defer cur.deinit();
+    const db = try txn.database(null, .{});
+    try cur.bind(db);
+
+    const k = (try cur.goToFirst()).?;
+    try expectEqualSlices(u8, "hello", k);
+}
+
+test "transaction: straggler returns 0..100" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("k", "v", .Upsert);
+        try txn.commit();
+    }
+
+    const txn = try env.transaction(.{ .mode = .ReadOnly });
+    defer txn.abort() catch unreachable;
+
+    const pct = try txn.straggler();
+    try expect(pct <= 100);
+}
+
+test "environment: defrag returns a result struct" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        var i: u32 = 0;
+        while (i < 64) : (i += 1) {
+            var kbuf: [8]u8 = undefined;
+            const k = std.fmt.bufPrint(&kbuf, "k{d}", .{i}) catch unreachable;
+            try txn.set(k, "v", .Upsert);
+        }
+        try txn.commit();
+    }
+
+    const result = try env.defrag(.{ .time_limit_ms = 100 });
+    try expect(result.cycles >= 0);
+}
+
+test "transaction: gcInfo returns sane fields" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("k", "v", .Upsert);
+        try txn.commit();
+    }
+
+    const txn = try env.transaction(.{ .mode = .ReadOnly });
+    defer txn.abort() catch unreachable;
+
+    const info = try txn.gcInfo();
+    try expect(info.pages_total >= info.pages_gc);
+}
+
+test "cursor: scan visits all entries until predicate stops" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("a", "1", .Upsert);
+        try txn.set("b", "2", .Upsert);
+        try txn.set("c", "3", .Upsert);
+        try txn.commit();
+    }
+
+    const txn = try env.transaction(.{ .mode = .ReadOnly });
+    defer txn.abort() catch unreachable;
+
+    const cur = try lmdb.Cursor.create(null);
+    defer cur.deinit();
+    try cur.bind(try txn.database(null, .{}));
+
+    const Counter = struct { n: u32 = 0 };
+    const pred = struct {
+        fn p(ctx: Counter, _: []const u8, _: []const u8) lmdb.Cursor.PredicateResult {
+            _ = ctx;
+            return .continue_;
+        }
+    }.p;
+    var ctr = Counter{};
+    const stopped = try cur.scan(Counter, pred, &ctr, .first, .next);
+    try expect(!stopped);
+
+    const stop_pred = struct {
+        fn p(_: Counter, key: []const u8, _: []const u8) lmdb.Cursor.PredicateResult {
+            return if (std.mem.eql(u8, key, "b")) .stop else .continue_;
+        }
+    }.p;
+    var ctr2 = Counter{};
+    const stopped2 = try cur.scan(Counter, stop_pred, &ctr2, .first, .next);
+    try expect(stopped2);
+}
+
+test "database: cacheGet returns the value" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const env = try open(std.testing.io, tmp.dir, .{});
+    defer env.deinit() catch unreachable;
+
+    {
+        const txn = try env.transaction(.{ .mode = .ReadWrite });
+        try txn.set("hello", "world", .Upsert);
+        try txn.commit();
+    }
+
+    const txn = try env.transaction(.{ .mode = .ReadOnly });
+    defer txn.abort() catch unreachable;
+
+    const db = try txn.database(null, .{});
+    var entry: lmdb.Database.CacheEntry = .{};
+    const r = db.cacheGet("hello", &entry);
+    try expect(r.status != .err);
+    try expect(r.value != null);
+    try expectEqualSlices(u8, "world", r.value.?);
+}

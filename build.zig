@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const IS_DEV = if (optimize == .Debug) true else false;
+    const enable_mdbx_debug = b.option(bool, "mdbx-debug", "Compile libmdbx with MDBX_DEBUG=2 (verbose runtime asserts and logs)") orelse false;
 
     // For Linux GNU targets, always target glibc 2.31 for broad compatibility
     if (target.result.os.tag == .linux and target.result.abi == .gnu) {
@@ -64,8 +65,10 @@ pub fn build(b: *std.Build) void {
             "-ULIBMDBX_EXPORTS",
 
             // Debug features
-            if (IS_DEV) "-DMDBX_DEBUG=2" else "-DMDBX_DEBUG=0",
-            if (IS_DEV) "-DMDBX_BUILD_FLAGS=\"UNDEBUG\"" else "-DMDBX_BUILD_FLAGS=\"DNDEBUG=1\"",
+            // MDBX_DEBUG=-1 makes LOG_ENABLED() compile to (0), removing all
+            // runtime log call sites entirely (incl. NOTICE chatter on stderr).
+            if (enable_mdbx_debug) "-DMDBX_DEBUG=2" else "-DMDBX_DEBUG=-1",
+            if (enable_mdbx_debug) "-DMDBX_BUILD_FLAGS=\"UNDEBUG\"" else "-DMDBX_BUILD_FLAGS=\"DNDEBUG=1\"",
 
             // Fix for LLVM 19+ requiring evex512 for AVX-512 512-bit intrinsics (Zig 0.13+)
             // See: https://github.com/ziglang/zig/issues/20414

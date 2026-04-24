@@ -2,7 +2,7 @@
 
 Zig bindings for [libMDBX](https://libmdbx.dqdkfa.ru/) (a fork of LMDB).
 
-Built and tested with Zig version `0.15.2`.
+Built and tested with Zig version `0.16.0`.
 
 > _libmdbx_ is an extremely fast, compact, powerful, embedded, transactional [key-value database](https://en.wikipedia.org/wiki/Key-value_database) with a specific set of properties and capabilities,
 > focused on creating unique lightweight solutions.
@@ -215,6 +215,11 @@ pub const Environment = struct {
     pub fn syncPeriod(self: Environment) !u32
 
     pub fn setGeometry(self: Environment, options: DatabaseGeometry) !void
+
+    pub const DefragOptions = struct { ... };
+    pub const DefragResult = struct { ... };
+    /// Compact the database by relocating pages to the head of the file.
+    pub fn defrag(self: Environment, options: DefragOptions) !DefragResult
 };
 ```
 
@@ -284,6 +289,10 @@ pub const Transaction = struct {
 
     pub fn cursor(self: Transaction) !Cursor
     pub fn database(self: Transaction, name: ?[*:0]const u8, options: Database.Options) !Database
+
+    pub const GcInfo = struct { ... };
+    /// Inspect the free-page reuse list for this transaction's MVCC snapshot.
+    pub fn gcInfo(self: Transaction) !GcInfo
 };
 ```
 
@@ -335,6 +344,12 @@ pub const Database = struct {
     pub fn stat(self: Database) !Stat
     pub fn rename(self: Database, name: [*:0]const u8) !void
     pub fn sequence(self: Database, increment: u64) !u64
+
+    pub const CacheEntry = struct { ... };
+    pub const CacheStatus = enum(c_int) { err, behind, unable, race, dirty, hit, confirmed, refreshed };
+    pub const CacheResult = struct { value: ?[]const u8, status: CacheStatus, err_code: c_int };
+    /// Variant of `get` that maintains an external cache slot to skip work on hits.
+    pub fn cacheGet(self: Database, key: []const u8, entry: *CacheEntry) CacheResult
 };
 ```
 
@@ -367,6 +382,13 @@ pub const Cursor = struct {
     pub fn goToKey(self: Cursor, key: []const u8) !void
 
     pub fn seek(self: Cursor, key: []const u8) !?[]const u8
+
+    pub const Op = enum(c_int) { first, next, prev, last, set_key, set_range, /* ... full MDBX_cursor_op set */ };
+    pub const PredicateResult = enum { stop, continue_ };
+    pub fn Predicate(comptime Context: type) type { return *const fn (ctx: Context, key: []const u8, value: []const u8) PredicateResult; }
+    /// Iterate entries via `start_op` then repeatedly `turn_op`. Returns true if `pred` requested stop.
+    pub fn scan(self: Cursor, comptime Context: type, comptime pred: Predicate(Context), ctx: *Context, start_op: Op, turn_op: Op) !bool
+    pub fn scanFrom(self: Cursor, comptime Context: type, comptime pred: Predicate(Context), ctx: *Context, from_op: Op, from_key: []const u8, from_value: []const u8, turn_op: Op) !bool
 };
 ```
 

@@ -74,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
             info.db_pagesize,
             info.sys_pagesize,
             info.autosync_threshold,
-            info.autosync_period,
+            info.autosync_period_seconds_16dot16,
             info.unsync_volume,
             sync_bytes,
             sync_period,

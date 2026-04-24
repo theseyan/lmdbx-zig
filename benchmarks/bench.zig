@@ -251,7 +251,7 @@ fn printEnvInfo(w: *std.Io.Writer, env: lmdb.Environment, label: []const u8) !vo
             info.db_pagesize,
             info.sys_pagesize,
             info.autosync_threshold,
-            info.autosync_period,
+            info.autosync_period_seconds_16dot16,
             info.unsync_volume,
             sync_bytes,
             sync_period,
