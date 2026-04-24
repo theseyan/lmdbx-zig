@@ -225,6 +225,26 @@ pub const Transaction = struct {
     pub fn database(self: Transaction, name: ?[*:0]const u8, options: @import("Database.zig").Options) !@import("Database.zig") {
         return try self.txn.database(name, options);
     }
+
+    pub fn id(self: Transaction) u64 {
+        return self.txn.id();
+    }
+
+    pub fn info(self: Transaction, scan_rlt: bool) !BaseTransaction.Info {
+        return try self.txn.info(scan_rlt);
+    }
+
+    pub fn straggler(self: Transaction) !u8 {
+        return try self.txn.straggler();
+    }
+
+    pub fn checkpoint(self: Transaction, weakening_durability: u32) !BaseTransaction.CommitLatency {
+        return try self.txn.checkpoint(weakening_durability);
+    }
+
+    pub fn gcInfo(self: Transaction) !BaseTransaction.GcInfo {
+        return try self.txn.gcInfo();
+    }
 };
 
 pub const CommitCallback = *const fn (ctx: ?*anyopaque, success: bool) void;
