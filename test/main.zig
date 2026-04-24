@@ -7,22 +7,21 @@ const lmdb = @import("lmdbx");
 const utils = @import("utils.zig");
 const compare = @import("compare.zig");
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-var allocator = gpa.allocator();
+const allocator = std.testing.allocator;
 
 var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
-fn open(dir: std.fs.Dir, options: lmdb.Environment.Options) !lmdb.Environment {
-    const path = try dir.realpath(".", &path_buffer);
-    path_buffer[path.len] = 0;
-    return try lmdb.Environment.init(path_buffer[0..path.len :0], options);
+fn open(io: std.Io, dir: std.Io.Dir, options: lmdb.Environment.Options) !lmdb.Environment {
+    const path_len = try dir.realPath(io, &path_buffer);
+    path_buffer[path_len] = 0;
+    return try lmdb.Environment.init(path_buffer[0..path_len :0], options);
 }
 
 test "basic operations" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .max_dbs = 32 });
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 32 });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -61,7 +60,7 @@ test "replace operations" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .max_dbs = 8 });
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 8 });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -94,7 +93,7 @@ test "database rename" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .max_dbs = 32 });
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 32 });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -123,7 +122,7 @@ test "estimate range, canary, and sequence" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .max_dbs = 8 });
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 8 });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -164,7 +163,7 @@ test "cursor helpers and drop" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .max_dbs = 16 });
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 16 });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -230,7 +229,7 @@ test "nested transactions" {
     defer tmp.cleanup();
 
     {
-        const env = try open(tmp.dir, .{});
+        const env = try open(std.testing.io, tmp.dir, .{});
         defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
         {
@@ -263,11 +262,11 @@ test "nested transactions" {
     }
 
     {
-        const batched_env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+        const batched_env = try open(std.testing.io, tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
         defer batched_env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
         var bio: lmdb.BatchedDB = undefined;
-        try bio.init(batched_env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
+        try bio.init(std.testing.io, batched_env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
         defer bio.deinit();
 
         var outer = try bio.transaction(.{ .mode = .ReadWrite });
@@ -295,7 +294,7 @@ test "transaction reset renew park and userctx" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{});
+    const env = try open(std.testing.io, tmp.dir, .{});
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -335,11 +334,11 @@ test "batched io basic and concurrent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    const env = try open(std.testing.io, tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     var bio: lmdb.BatchedDB = undefined;
-    try bio.init(env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
+    try bio.init(std.testing.io, env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
     defer bio.deinit();
 
     {
@@ -391,11 +390,11 @@ test "batched transaction reset and userctx" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    const env = try open(std.testing.io, tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     var bio: lmdb.BatchedDB = undefined;
-    try bio.init(env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
+    try bio.init(std.testing.io, env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1 });
     defer bio.deinit();
 
     {
@@ -430,11 +429,11 @@ test "batched io commit async callback" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    const env = try open(std.testing.io, tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     var bio: lmdb.BatchedDB = undefined;
-    try bio.init(env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1, .callback_capacity = 16 });
+    try bio.init(std.testing.io, env, allocator, .{ .sync_interval_ms = 1, .sync_bytes = 1, .callback_capacity = 16 });
     defer bio.deinit();
 
     const Ctx = struct {
@@ -464,7 +463,7 @@ test "batched io commit async callback" {
     // Wait for callbacks to fire (sync thread).
     var spins: u32 = 0;
     while (ctx.called.load(.acquire) < 2 and spins < 1000) : (spins += 1) {
-        std.Thread.sleep(1_000_000);
+        std.testing.io.sleep(.fromNanoseconds(1_000_000), .awake) catch {};
     }
 
     try expectEqual(@as(u32, 2), ctx.called.load(.acquire));
@@ -481,11 +480,11 @@ test "batched io async callback respects failed seq" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
+    const env = try open(std.testing.io, tmp.dir, .{ .safe_nosync = true, .no_meta_sync = true });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     var bio: lmdb.BatchedDB = undefined;
-    try bio.init(env, allocator, .{ .sync_interval_ms = 200, .sync_bytes = 1, .callback_capacity = 8 });
+    try bio.init(std.testing.io, env, allocator, .{ .sync_interval_ms = 200, .sync_bytes = 1, .callback_capacity = 8 });
     defer bio.deinit();
 
     const Ctx = struct {
@@ -513,7 +512,7 @@ test "batched io async callback respects failed seq" {
 
     var spins: u32 = 0;
     while (ctx.called.load(.acquire) < 1 and spins < 2000) : (spins += 1) {
-        std.Thread.sleep(1_000_000);
+        std.testing.io.sleep(.fromNanoseconds(1_000_000), .awake) catch {};
     }
 
     try expectEqual(@as(u32, 1), ctx.called.load(.acquire));
@@ -524,7 +523,7 @@ test "multiple named databases" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{ .max_dbs = 2 });
+    const env = try open(std.testing.io, tmp.dir, .{ .max_dbs = 2 });
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -568,13 +567,13 @@ test "compareEntries" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir("a");
-    try tmp.dir.makeDir("b");
+    try tmp.dir.createDir(std.testing.io, "a", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "b", .default_dir);
 
-    var dir_a = try tmp.dir.openDir("a", .{});
-    defer dir_a.close();
+    var dir_a = try tmp.dir.openDir(std.testing.io, "a", .{});
+    defer dir_a.close(std.testing.io);
 
-    const env_a = try open(dir_a, .{});
+    const env_a = try open(std.testing.io, dir_a, .{});
     defer env_a.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -588,10 +587,10 @@ test "compareEntries" {
         try txn.commit();
     }
 
-    var dir_b = try tmp.dir.openDir("b", .{});
-    defer dir_b.close();
+    var dir_b = try tmp.dir.openDir(std.testing.io, "b", .{});
+    defer dir_b.close(std.testing.io);
 
-    const env_b = try open(dir_b, .{});
+    const env_b = try open(std.testing.io, dir_b, .{});
     defer env_b.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -623,7 +622,7 @@ test "set empty value" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{});
+    const env = try open(std.testing.io, tmp.dir, .{});
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     const txn = try env.transaction(.{ .mode = .ReadWrite });
@@ -642,7 +641,7 @@ test "set empty value" {
 //     var tmp = std.testing.tmpDir(.{});
 //     defer tmp.cleanup();
 
-//     const env = try open(tmp.dir, .{});
+//     const env = try open(std.testing.io, tmp.dir, .{});
 //     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
 //     {
@@ -679,7 +678,7 @@ test "Cursor.deleteCurrentKey()" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{});
+    const env = try open(std.testing.io, tmp.dir, .{});
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -714,7 +713,7 @@ test "Cursor.seek" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{});
+    const env = try open(std.testing.io, tmp.dir, .{});
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     {
@@ -738,7 +737,7 @@ test "parent transactions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const env = try open(tmp.dir, .{});
+    const env = try open(std.testing.io, tmp.dir, .{});
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: error {any}", .{e});
 
     const parent_txn = try env.transaction(.{ .mode = .ReadWrite });
@@ -774,7 +773,7 @@ test "parent transactions" {
 
 //     var map_size: usize = 64 * 4096;
 
-//     const env = try open(tmp.dir, .{ .map_size = map_size });
+//     const env = try open(std.testing.io, tmp.dir, .{ .map_size = map_size });
 //     defer env.deinit();
 
 //     var i: u32 = 0;

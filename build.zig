@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
 
     const mdbx = b.addModule("lmdbx", .{ .root_source_file = b.path("src/lib.zig") });
     const zbench_dep = b.dependency("zbench", .{});
-    const zbench_mod = b.addModule("zbench", .{ .root_source_file = zbench_dep.path("zbench.zig") });
+    const zbench_mod = b.addModule("zbench", .{ .root_source_file = zbench_dep.path("src/zbench.zig") });
 
     // Add CPU features polyfill until https://github.com/ziglang/zig/pull/20081 gets merged
     const cpuf_dep = b.dependency("cpu_features", .{});

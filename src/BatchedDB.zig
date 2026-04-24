@@ -18,6 +18,7 @@ pub const Options = struct {
 };
 
 env: Environment,
+io: std.Io,
 sync_interval_ns: u64,
 sync_bytes: u64,
 allocator: std.mem.Allocator,
@@ -44,9 +45,10 @@ failed_seq: std.atomic.Value(u64) align(std.atomic.cache_line) = std.atomic.Valu
 last_sync_ns: u64,
 thread: ?std.Thread = null,
 
-pub fn init(self: *BatchedDB, env: Environment, allocator: std.mem.Allocator, options: Options) !void {
+pub fn init(self: *BatchedDB, io: std.Io, env: Environment, allocator: std.mem.Allocator, options: Options) !void {
     self.* = BatchedDB{
         .env = env,
+        .io = io,
         .sync_interval_ns = @as(u64, options.sync_interval_ms) * 1_000_000,
         .sync_bytes = options.sync_bytes,
         .allocator = allocator,
@@ -74,9 +76,9 @@ pub fn init(self: *BatchedDB, env: Environment, allocator: std.mem.Allocator, op
 pub fn deinit(self: *BatchedDB) void {
     self.stop.store(true, .release);
     _ = self.sync_counter.fetchAdd(1, .release);
-    std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
+    self.io.futexWake(u32, &self.sync_counter.raw, std.math.maxInt(u32));
     _ = self.sync_signal.fetchAdd(1, .release);
-    std.Thread.Futex.wake(&self.sync_signal, std.math.maxInt(u32));
+    self.io.futexWake(u32, &self.sync_signal.raw, std.math.maxInt(u32));
     if (self.thread) |t| t.join();
     if (self.callbacks) |buf| {
         self.allocator.free(buf);
@@ -127,7 +129,7 @@ pub const Transaction = struct {
             db.enqueueCallback(seq, cb, ctx) catch |e| switch (e) {
                 error.CallbackQueueFull => {
                     const cur = db.sync_counter.load(.acquire);
-                    std.Thread.Futex.wait(&db.sync_counter, cur);
+                    db.io.futexWaitUncancelable(u32, &db.sync_counter.raw, cur);
                     continue;
                 },
                 else => return e,
@@ -247,7 +249,7 @@ fn waitForDurable(self: *BatchedDB, seq: u64) !void {
             return error.SyncFailed;
         }
         const cur = self.sync_counter.load(.acquire);
-        std.Thread.Futex.wait(&self.sync_counter, cur);
+        self.io.futexWaitUncancelable(u32, &self.sync_counter.raw, cur);
     }
 }
 
@@ -272,15 +274,16 @@ fn enqueueCallback(self: *BatchedDB, seq: u64, cb: CommitCallback, ctx: ?*anyopa
 }
 
 fn syncLoop(self: *BatchedDB) void {
+    const io = self.io;
     while (true) {
         if (self.stop.load(.acquire)) return;
         if (self.last_sync_ns == 0) {
-            self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+            self.last_sync_ns = monotonicNs(io);
         }
         const deadline = self.last_sync_ns + self.sync_interval_ns;
-        const now = @as(u64, @intCast(std.time.nanoTimestamp()));
+        const now = monotonicNs(io);
         if (now < deadline) {
-            std.Thread.sleep(deadline - now);
+            io.sleep(.fromNanoseconds(@intCast(deadline - now)), .awake) catch {};
         }
 
         const target = self.issued_seq.load(.monotonic);
@@ -288,42 +291,47 @@ fn syncLoop(self: *BatchedDB) void {
         if (target == durable) {
             if (self.sync_interval_ns == 0) {
                 const cur = self.sync_signal.load(.acquire);
-                std.Thread.Futex.wait(&self.sync_signal, cur);
+                io.futexWaitUncancelable(u32, &self.sync_signal.raw, cur);
                 continue;
             }
-            self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+            self.last_sync_ns = monotonicNs(io);
             _ = self.sync_counter.fetchAdd(1, .release);
-            std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
+            io.futexWake(u32, &self.sync_counter.raw, std.math.maxInt(u32));
             self.drainCallbacks(target, true);
             continue;
         }
         _ = self.env.sync(false, true) catch |err| switch (err) {
             error.MDBX_BUSY => {
-                self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+                self.last_sync_ns = monotonicNs(io);
                 continue;
             },
             else => {
                 std.debug.print("batched io sync error: {any}\n", .{err});
                 updateSeqMax(&self.failed_seq, target);
-                self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+                self.last_sync_ns = monotonicNs(io);
                 _ = self.sync_counter.fetchAdd(1, .release);
-                std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
+                io.futexWake(u32, &self.sync_counter.raw, std.math.maxInt(u32));
                 self.drainCallbacks(target, false);
                 continue;
             },
         };
         updateSeqMax(&self.durable_seq, target);
-        self.last_sync_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+        self.last_sync_ns = monotonicNs(io);
 
         _ = self.sync_counter.fetchAdd(1, .release);
-        std.Thread.Futex.wake(&self.sync_counter, std.math.maxInt(u32));
+        io.futexWake(u32, &self.sync_counter.raw, std.math.maxInt(u32));
         self.drainCallbacks(target, true);
     }
 }
 
 fn notifySync(self: *BatchedDB) void {
     _ = self.sync_signal.fetchAdd(1, .release);
-    std.Thread.Futex.wake(&self.sync_signal, 1);
+    self.io.futexWake(u32, &self.sync_signal.raw, 1);
+}
+
+inline fn monotonicNs(io: std.Io) u64 {
+    const ts = std.Io.Clock.awake.now(io);
+    return @intCast(ts.nanoseconds);
 }
 
 fn drainCallbacks(self: *BatchedDB, threshold: u64, success: bool) void {

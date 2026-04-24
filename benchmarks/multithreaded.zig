@@ -1,8 +1,13 @@
 const std = @import("std");
 const lmdb = @import("lmdbx");
+const tempdir = @import("tempdir.zig");
 const allocator = std.heap.c_allocator;
 
 const ns_per_s: u64 = 1_000_000_000;
+
+fn monotonicNs(io: std.Io) i128 {
+    return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
+}
 
 const BenchKind = enum { Read, Write };
 
@@ -65,6 +70,7 @@ const CallbackCtx = struct {
     batch: u64,
     latency: *LatencyStats,
     queue: *LatencyQueue,
+    io: std.Io = undefined,
 };
 
 const Precomputed = struct {
@@ -75,9 +81,10 @@ const Precomputed = struct {
     value_size: usize,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var stdout_buffer: [4096]u8 = undefined;
-    var log = std.fs.File.stdout().writer(&stdout_buffer);
+    var log = std.Io.File.stdout().writer(io, &stdout_buffer);
 
     var options = lmdb.Environment.Options{
         .exclusive = true
@@ -90,7 +97,7 @@ pub fn main() !void {
     var db_path: ?[]const u8 = null;
     var use_batched: bool = false;
 
-    var args = std.process.args();
+    var args = init.minimal.args.iterate();
     _ = args.skip(); // program name
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--safe-nosync")) {
@@ -133,14 +140,14 @@ pub fn main() !void {
         return;
     }
 
-    var tmp: ?std.testing.TmpDir = null;
-    defer if (tmp) |*t| t.cleanup();
+    var tmp: ?tempdir.TempDir = null;
+    defer if (tmp) |*t| t.cleanup(io);
 
     const env = if (db_path) |path|
         try openPath(path, options)
     else blk: {
-        tmp = std.testing.tmpDir(.{});
-        break :blk try open(tmp.?.dir, options);
+        tmp = try tempdir.tempDir(io, .{});
+        break :blk try open(io, tmp.?.dir, options);
     };
     defer env.deinit() catch |e| std.debug.panic("Failed to deinit env: {any}", .{e});
 
@@ -195,7 +202,7 @@ pub fn main() !void {
     );
 
     for (benches) |bench| {
-        const result = try runBenchmark(env, use_batched, options, bench, threads, duration_s, keyspace, key_size, value_size);
+        const result = try runBenchmark(io, env, use_batched, options, bench, threads, duration_s, keyspace, key_size, value_size);
         const effective_ops = if (use_batched and bench.kind == .Write) result.completed_ops else result.ops;
         const ops_per_sec = @as(f64, @floatFromInt(effective_ops)) / @as(f64, @floatFromInt(duration_s));
         try log.interface.print(
@@ -214,6 +221,7 @@ pub fn main() !void {
 }
 
 fn runBenchmark(
+    io: std.Io,
     env: lmdb.Environment,
     use_batched: bool,
     options: lmdb.Environment.Options,
@@ -229,7 +237,7 @@ fn runBenchmark(
     var latency = LatencyStats{};
     if (use_batched and bench.kind == .Write) {
         const cb_capacity = threads * 4096;
-        try batched_io_storage.init(env, allocator, .{
+        try batched_io_storage.init(io, env, allocator, .{
             .sync_interval_ms = if (options.sync_period_ms != 0) options.sync_period_ms else 5,
             .sync_bytes = if (options.sync_bytes != 0) options.sync_bytes else 0,
             .callback_capacity = cb_capacity,
@@ -237,7 +245,7 @@ fn runBenchmark(
         batched_io_ptr = &batched_io_storage;
     }
     defer if (batched_io_ptr) |bio| bio.deinit();
-    const end_time = std.time.nanoTimestamp() + @as(i128, @intCast(duration_s * ns_per_s));
+    const end_time = monotonicNs(io) + @as(i128, @intCast(duration_s * ns_per_s));
     var total_ops = std.atomic.Value(u64).init(0);
     var total_submitted = std.atomic.Value(u64).init(0);
     var total_completed = std.atomic.Value(u64).init(0);
@@ -294,6 +302,7 @@ fn runBenchmark(
 
     for (thread_handles, 0..) |*handle, idx| {
         handle.* = try std.Thread.spawn(.{}, worker, .{
+            io,
             env,
             batched_io_ptr,
             end_time,
@@ -314,9 +323,9 @@ fn runBenchmark(
         ops;
     if (use_batched and bench.kind == .Write) {
         const submitted = total_submitted.load(.monotonic);
-        const wait_deadline = std.time.nanoTimestamp() + @as(i128, 2) * ns_per_s;
-        while (completed < submitted and std.time.nanoTimestamp() < wait_deadline) {
-            std.Thread.sleep(1_000_000);
+        const wait_deadline = monotonicNs(io) + @as(i128, 2) * ns_per_s;
+        while (completed < submitted and monotonicNs(io) < wait_deadline) {
+            io.sleep(.fromNanoseconds(1_000_000), .awake) catch {};
             completed = total_completed.load(.monotonic);
         }
     }
@@ -331,6 +340,7 @@ fn runBenchmark(
 }
 
 fn worker(
+    io: std.Io,
     env: lmdb.Environment,
     batched_io: ?*lmdb.BatchedDB,
     end_time: i128,
@@ -345,7 +355,7 @@ fn worker(
     var offset: usize = 0;
     const cap = precomputed.count;
     const batch_ops = @as(u64, @intCast(bench.batch));
-    const cb = struct {
+    const CbWrap = struct {
         fn run(ctx: ?*anyopaque, success: bool) void {
             if (!success) {
                 @panic("batched commit sync failed");
@@ -353,13 +363,15 @@ fn worker(
             const cctx = @as(*CallbackCtx, @ptrCast(@alignCast(ctx.?)));
             _ = cctx.completed.fetchAdd(cctx.batch, .monotonic);
             const start_ns = cctx.queue.tryPop() orelse return;
-            const now_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+            const now_ns = @as(u64, @intCast(monotonicNs(cctx.io)));
             const delta = now_ns - start_ns;
             recordLatency(cctx.latency, delta);
         }
-    }.run;
+    };
+    const cb = CbWrap.run;
+    cb_ctx.io = io;
 
-    while (std.time.nanoTimestamp() < end_time) {
+    while (monotonicNs(io) < end_time) {
         var txn_opt: ?lmdb.Transaction = null;
         var batched_opt: ?lmdb.BatchedDB.Transaction = null;
 
@@ -401,14 +413,14 @@ fn worker(
         }
 
         if (batched_opt) |bt| {
-            const start_ns = @as(u64, @intCast(std.time.nanoTimestamp()));
+            const start_ns = @as(u64, @intCast(monotonicNs(io)));
             _ = cb_ctx.queue.tryPush(start_ns);
             bt.commitAsync(cb, cb_ctx) catch |e| std.debug.panic("batched commit async failed: {any}", .{e});
             _ = total_submitted.fetchAdd(batch_ops, .monotonic);
         } else {
-            const start_ns = std.time.nanoTimestamp();
+            const start_ns = monotonicNs(io);
             txn_opt.?.commit() catch @panic("txn commit failed");
-            const end_ns = std.time.nanoTimestamp();
+            const end_ns = monotonicNs(io);
             const delta = @as(u64, @intCast(end_ns - start_ns));
             recordLatency(latency, delta);
         }
@@ -429,11 +441,11 @@ fn recordLatency(stats: *LatencyStats, delta_ns: u64) void {
     }
 }
 
-fn open(dir: std.fs.Dir, options: lmdb.Environment.Options) !lmdb.Environment {
+fn open(io: std.Io, dir: std.Io.Dir, options: lmdb.Environment.Options) !lmdb.Environment {
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try dir.realpath(".", &path_buffer);
-    path_buffer[path.len] = 0;
-    return try lmdb.Environment.init(path_buffer[0..path.len :0], options);
+    const path_len = try dir.realPath(io, &path_buffer);
+    path_buffer[path_len] = 0;
+    return try lmdb.Environment.init(path_buffer[0..path_len :0], options);
 }
 
 fn openPath(path: []const u8, options: lmdb.Environment.Options) !lmdb.Environment {

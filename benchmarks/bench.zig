@@ -1,6 +1,7 @@
 const std = @import("std");
 const lmdb = @import("lmdbx");
 const zbench = @import("zbench");
+const tempdir = @import("tempdir.zig");
 
 const allocator = std.heap.c_allocator;
 const Args = struct {
@@ -12,24 +13,24 @@ const Args = struct {
     time_budget_ms: u64 = 2000,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
-    var log = std.fs.File.stdout().writer(&stdout_buffer);
+    var log = std.Io.File.stdout().writer(init.io, &stdout_buffer);
 
-    var args = try parseArgs(&log.interface);
+    var args = try parseArgs(init, &log.interface);
 
-    try runSingleSuite(&log.interface, &args);
+    try runSingleSuite(init.io, &log.interface, &args);
 }
 
-fn runSingleSuite(w: *std.Io.Writer, args: *const Args) !void {
+fn runSingleSuite(io: std.Io, w: *std.Io.Writer, args: *const Args) !void {
     const sizes = if (args.db_path != null)
         &[_]u64{args.keyspace}
     else
         &[_]u64{1_000};
 
     for (sizes) |size| {
-        var ctx = try SingleContext.init(args, size);
-        defer ctx.deinit();
+        var ctx = try SingleContext.init(io, args, size);
+        defer ctx.deinit(io);
 
         try printEnvInfo(w, ctx.env, "single-threaded bench");
         try w.print("dataset entries={d} key_size={d} value_size={d}\n\n", .{ size, args.key_size, args.value_size });
@@ -61,15 +62,15 @@ fn runSingleSuite(w: *std.Io.Writer, args: *const Args) !void {
         try bench.addParam("set random 50k entries", &b10, .{});
         try bench.addParam("set sequential 50k entries", &b11, .{});
 
-        try bench.run(w);
         try w.flush();
+        try bench.run(io, std.Io.File.stdout());
         try w.writeAll("\n");
     }
 }
 
 const SingleContext = struct {
     env: lmdb.Environment,
-    tmp: ?std.testing.TmpDir,
+    tmp: ?tempdir.TempDir,
     size: u64,
     key_size: usize,
     value_size: usize,
@@ -78,13 +79,13 @@ const SingleContext = struct {
     val_buf: []u8,
     seq_cursor: u64,
 
-    fn init(args: *const Args, size: u64) !SingleContext {
-        var tmp: ?std.testing.TmpDir = null;
+    fn init(io: std.Io, args: *const Args, size: u64) !SingleContext {
+        var tmp: ?tempdir.TempDir = null;
         const env = if (args.db_path) |path|
             try openPath(path, args.options)
         else blk: {
-            tmp = std.testing.tmpDir(.{});
-            break :blk try open(tmp.?.dir, args.options);
+            tmp = try tempdir.tempDir(io, .{});
+            break :blk try open(io, tmp.?.dir, args.options);
         };
 
         if (args.db_path == null) {
@@ -109,11 +110,11 @@ const SingleContext = struct {
         };
     }
 
-    fn deinit(self: *SingleContext) void {
+    fn deinit(self: *SingleContext, io: std.Io) void {
         self.env.deinit() catch |e| std.debug.panic("Failed to deinit env: {any}", .{e});
         allocator.free(self.key_buf);
         allocator.free(self.val_buf);
-        if (self.tmp) |*t| t.cleanup();
+        if (self.tmp) |*t| t.cleanup(io);
     }
 
 };
@@ -264,11 +265,11 @@ fn printEnvInfo(w: *std.Io.Writer, env: lmdb.Environment, label: []const u8) !vo
     );
 }
 
-fn open(dir: std.fs.Dir, options: lmdb.Environment.Options) !lmdb.Environment {
+fn open(io: std.Io, dir: std.Io.Dir, options: lmdb.Environment.Options) !lmdb.Environment {
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try dir.realpath(".", &path_buffer);
-    path_buffer[path.len] = 0;
-    return try lmdb.Environment.init(path_buffer[0..path.len :0], options);
+    const path_len = try dir.realPath(io, &path_buffer);
+    path_buffer[path_len] = 0;
+    return try lmdb.Environment.init(path_buffer[0..path_len :0], options);
 }
 
 fn openPath(path: []const u8, options: lmdb.Environment.Options) !lmdb.Environment {
@@ -279,10 +280,10 @@ fn openPath(path: []const u8, options: lmdb.Environment.Options) !lmdb.Environme
     return try lmdb.Environment.init(path_buffer[0..path.len :0], options);
 }
 
-fn parseArgs(w: *std.Io.Writer) !Args {
+fn parseArgs(init: std.process.Init, w: *std.Io.Writer) !Args {
     var args = Args{};
 
-    var it = std.process.args();
+    var it = init.minimal.args.iterate();
     _ = it.skip();
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--safe-nosync")) {

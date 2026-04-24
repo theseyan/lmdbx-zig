@@ -3,9 +3,10 @@ const lmdb = @import("lmdbx");
 
 const allocator = std.heap.c_allocator;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     var stdout_buffer: [4096]u8 = undefined;
-    var log = std.fs.File.stdout().writer(&stdout_buffer);
+    var log = std.Io.File.stdout().writer(io, &stdout_buffer);
 
     var options = lmdb.Environment.Options{};
     var path: ?[]const u8 = null;
@@ -14,7 +15,7 @@ pub fn main() !void {
     var value_size: usize = 512;
     var batch: usize = 1000;
 
-    var args = std.process.args();
+    var args = init.minimal.args.iterate();
     _ = args.skip();
     while (args.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "--path=")) {
@@ -155,7 +156,7 @@ fn usage(w: *std.Io.Writer) !void {
 }
 
 fn fillFromId(buf: []u8, id: u64) void {
-    var x = id + 0x9e3779b97f4a7c15;
+    var x = id +% 0x9e3779b97f4a7c15;
     var i: usize = 0;
     while (i < buf.len) : (i += 8) {
         x = splitmix64(x);
@@ -167,7 +168,7 @@ fn fillFromId(buf: []u8, id: u64) void {
 }
 
 fn splitmix64(x: u64) u64 {
-    var z = x + 0x9e3779b97f4a7c15;
+    var z = x +% 0x9e3779b97f4a7c15;
     z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
     z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
     return z ^ (z >> 31);
